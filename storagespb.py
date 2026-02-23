@@ -26,7 +26,8 @@ def normalize_art(s):
 
 # ---------- Загрузка данных из CSV ----------
 inventory = {}               # оригинальный артикул -> [доп_артикул, количество, цена (строка)]
-art_norm_to_original = {}    # нормализованный артикул -> оригинальный артикул
+art_norm_to_original = {}    # нормализованный основной артикул -> оригинальный артикул
+dop_norm_to_original = {}    # нормализованный доп. артикул -> оригинальный основной артикул
 
 try:
     with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -43,6 +44,8 @@ try:
                 if art:
                     inventory[art] = [dop, qty, price]
                     art_norm_to_original[normalize_art(art)] = art
+                    if dop:  # если доп. артикул не пустой
+                        dop_norm_to_original[normalize_art(dop)] = art
 except FileNotFoundError:
     print(f"⚠️ Файл {DATA_FILE} не найден, будет создан при первом изменении.")
 except Exception as e:
@@ -58,11 +61,21 @@ def save_inventory():
         for art, (dop, qty, price) in inventory.items():
             writer.writerow([art, dop, qty, price])
 
+# ---------- Вспомогательная функция для поиска артикула ----------
+def find_original_art(query):
+    """Возвращает оригинальный основной артикул по запросу (основному или доп.)."""
+    norm_query = normalize_art(query)
+    if norm_query in art_norm_to_original:
+        return art_norm_to_original[norm_query]
+    if norm_query in dop_norm_to_original:
+        return dop_norm_to_original[norm_query]
+    return None
+
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "👋 Бот складского учёта.\n\n"
-        "🔍 Просто отправьте артикул (например, AC-K171eh), и я покажу информацию о нём.\n\n"
+        "🔍 Просто отправьте артикул (основной или дополнительный), и я покажу информацию о нём.\n\n"
         "📦 Команды для изменения количества:\n"
         "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
         "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
@@ -90,12 +103,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        norm_art = normalize_art(art_input)
-        if norm_art not in art_norm_to_original:
+        original_art = find_original_art(art_input)
+        if original_art is None:
             await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
             return
 
-        original_art = art_norm_to_original[norm_art]
         dop, qty, price = inventory[original_art]
 
         if command == 'добавить':
@@ -126,14 +138,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Если не команда, считаем запросом артикула
-    norm_art = normalize_art(text)
-    if norm_art not in art_norm_to_original:
+    original_art = find_original_art(text)
+    if original_art is None:
         await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
         return
 
-    original_art = art_norm_to_original[norm_art]
     dop, qty, price = inventory[original_art]
-
     reply = (
         f"🔍 Артикул: {original_art}\n"
         f"📎 Доп. артикул: {dop}\n"
