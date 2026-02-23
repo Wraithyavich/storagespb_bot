@@ -162,7 +162,17 @@ def find_catalog_arts(query):
 def format_catalog_art(art):
     """Форматирует информацию об артикуле из каталога с привязкой к складу"""
     dop_list = catalog.get(art, [])
-    dop_str = ", ".join(dop_list) if dop_list else "нет"
+    # Оставляем только базовую часть до дефиса
+    dop_short = []
+    for d in dop_list:
+        if '-' in d:
+            base = d.split('-')[0]
+        else:
+            base = d
+        dop_short.append(base)
+    # Убираем дубликаты и сортируем
+    unique_dop = sorted(set(dop_short))
+    dop_str = ", ".join(unique_dop) if unique_dop else "нет"
     # Проверяем наличие на складе
     if art in inventory:
         _, qty, price = inventory[art]
