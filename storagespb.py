@@ -92,7 +92,12 @@ def partial_search(query):
 # ---------- Вспомогательная функция для форматирования информации об артикуле ----------
 def format_item_info(art):
     dop, qty, price = inventory[art]
-    return f"• {art} (доп: {dop}, кол-во: {qty}, цена: {price})"
+    return (
+        f"🔍 Артикул: {art}\n"
+        f"  📎 Доп. артикул: {dop}\n"
+        f"  📦 Количество: {qty}\n"
+        f"  💰 Цена: {price}"
+    )
 
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,7 +146,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 # Несколько кандидатов – показываем список и просим уточнить
                 lines = [format_item_info(art) for art in candidates]
-                reply = "🔍 Найдено несколько артикулов:\n" + "\n".join(lines) + "\n\nУточните запрос, используя полный артикул."
+                reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
                 await update.message.reply_text(reply)
                 return
 
@@ -193,7 +198,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # Если есть результаты, показываем все
         lines = [format_item_info(art) for art in candidates]
-        reply = "🔍 Найдено несколько артикулов:\n" + "\n".join(lines)
+        reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
 
     await update.message.reply_text(reply)
 
