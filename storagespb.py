@@ -12,6 +12,7 @@ if API_TOKEN is None:
 
 # ---------- Имя файла с данными ----------
 DATA_FILE = 'inventory.csv'
+MIN_SEARCH_LENGTH = 4  # минимальная длина для частичного поиска
 
 # ---------- Очистка текста ----------
 def clean_text(s):
@@ -40,11 +41,11 @@ try:
                     qty = int(clean_text(row[2]))
                 except ValueError:
                     qty = 0
-                price = clean_text(row[3])   # оставляем как строку, без преобразования
+                price = clean_text(row[3])
                 if art:
                     inventory[art] = [dop, qty, price]
                     art_norm_to_original[normalize_art(art)] = art
-                    if dop:  # если доп. артикул не пустой
+                    if dop:
                         dop_norm_to_original[normalize_art(dop)] = art
 except FileNotFoundError:
     print(f"⚠️ Файл {DATA_FILE} не найден, будет создан при первом изменении.")
@@ -61,9 +62,9 @@ def save_inventory():
         for art, (dop, qty, price) in inventory.items():
             writer.writerow([art, dop, qty, price])
 
-# ---------- Вспомогательная функция для поиска артикула ----------
-def find_original_art(query):
-    """Возвращает оригинальный основной артикул по запросу (основному или доп.)."""
+# ---------- Функции поиска ----------
+def find_exact_original_art(query):
+    """Возвращает оригинальный основной артикул по точному совпадению (основному или доп.)."""
     norm_query = normalize_art(query)
     if norm_query in art_norm_to_original:
         return art_norm_to_original[norm_query]
@@ -71,15 +72,39 @@ def find_original_art(query):
         return dop_norm_to_original[norm_query]
     return None
 
+def partial_search(query):
+    """Возвращает список оригинальных основных артикулов, у которых основной или доп. артикул содержит query как подстроку."""
+    norm_query = normalize_art(query)
+    if len(norm_query) < MIN_SEARCH_LENGTH:
+        return []  # для коротких запросов частичный поиск не делаем
+
+    results = set()
+    # Поиск по основным артикулам
+    for norm_art, orig_art in art_norm_to_original.items():
+        if norm_query in norm_art:
+            results.add(orig_art)
+    # Поиск по дополнительным артикулам
+    for norm_dop, orig_art in dop_norm_to_original.items():
+        if norm_query in norm_dop:
+            results.add(orig_art)
+    return sorted(results)
+
+# ---------- Вспомогательная функция для форматирования информации об артикуле ----------
+def format_item_info(art):
+    dop, qty, price = inventory[art]
+    return f"• {art} (доп: {dop}, кол-во: {qty}, цена: {price})"
+
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "👋 Бот складского учёта.\n\n"
-        "🔍 Просто отправьте артикул (основной или дополнительный), и я покажу информацию о нём.\n\n"
+        "🔍 Просто отправьте артикул (основной или дополнительный), и я покажу информацию о нём.\n"
+        f"Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n\n"
         "📦 Команды для изменения количества:\n"
         "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
         "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
-        "Пример: добавить AC-K171eh, 5"
+        "Пример: добавить AC-K171eh, 5\n\n"
+        "Для неполных артикулов при изменении нужно точное совпадение, иначе бот покажет список найденных."
     )
     await update.message.reply_text(welcome_text)
 
@@ -103,10 +128,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        original_art = find_original_art(art_input)
+        # Сначала пытаемся найти точное совпадение
+        original_art = find_exact_original_art(art_input)
         if original_art is None:
-            await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
-            return
+            # Если точного нет, пробуем частичный поиск
+            candidates = partial_search(art_input)
+            if not candidates:
+                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
+                return
+            if len(candidates) == 1:
+                original_art = candidates[0]
+            else:
+                # Несколько кандидатов – показываем список и просим уточнить
+                lines = [format_item_info(art) for art in candidates]
+                reply = "🔍 Найдено несколько артикулов:\n" + "\n".join(lines) + "\n\nУточните запрос, используя полный артикул."
+                await update.message.reply_text(reply)
+                return
 
         dop, qty, price = inventory[original_art]
 
@@ -138,18 +175,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Если не команда, считаем запросом артикула
-    original_art = find_original_art(text)
-    if original_art is None:
-        await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
-        return
+    # Сначала точный поиск
+    original_art = find_exact_original_art(text)
+    if original_art is not None:
+        dop, qty, price = inventory[original_art]
+        reply = (
+            f"🔍 Артикул: {original_art}\n"
+            f"📎 Доп. артикул: {dop}\n"
+            f"📦 Количество: {qty}\n"
+            f"💰 Цена: {price}"
+        )
+    else:
+        # Частичный поиск
+        candidates = partial_search(text)
+        if not candidates:
+            await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
+            return
+        # Если есть результаты, показываем все
+        lines = [format_item_info(art) for art in candidates]
+        reply = "🔍 Найдено несколько артикулов:\n" + "\n".join(lines)
 
-    dop, qty, price = inventory[original_art]
-    reply = (
-        f"🔍 Артикул: {original_art}\n"
-        f"📎 Доп. артикул: {dop}\n"
-        f"📦 Количество: {qty}\n"
-        f"💰 Цена: {price}"
-    )
     await update.message.reply_text(reply)
 
 # ---------- Запуск бота ----------
