@@ -162,11 +162,11 @@ def find_catalog_arts(query):
 def format_catalog_art(art):
     """Форматирует информацию об артикуле из каталога с привязкой к складу"""
     dop_list = catalog.get(art, [])
-    # Оставляем только базовую часть до дефиса
+    # Оставляем базовую часть без последнего суффикса (всё до последнего дефиса)
     dop_short = []
     for d in dop_list:
         if '-' in d:
-            base = d.split('-')[0]
+            base = d.rsplit('-', 1)[0]  # всё до последнего дефиса
         else:
             base = d
         dop_short.append(base)
