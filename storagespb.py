@@ -6,7 +6,19 @@ from collections import defaultdict
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import asyncio
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import NetworkError, TimedOut
+from telegram.request import HTTPXRequest
 
+# ---------- Настройка логирования ----------
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 # ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
@@ -506,5 +518,51 @@ def main():
     print(f"🔑 Администраторов: {len(ADMIN_IDS)}")
     app.run_polling()
 
+# ---------- Запуск с повышенной надёжностью ----------
+async def run_bot():
+    # Создаём кастомный Request с увеличенными таймаутами
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=30
+    )
+    
+    app = Application.builder().token(API_TOKEN).request(request).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admins", admins))
+    app.add_handler(CommandHandler("last", last_changes))
+    app.add_handler(CommandHandler("reserves", reserves_command))  # если ещё нет
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Запускаем с повторными попытками при сетевых ошибках
+    while True:
+        try:
+            logger.info("Бот запускается...")
+            await app.initialize()
+            await app.start()
+            await app.updater.start_polling(drop_pending_updates=True)
+            # Бесконечно ждём, пока бот работает
+            while True:
+                await asyncio.sleep(1)
+        except (NetworkError, TimedOut, ConnectionError) as e:
+            logger.error(f"Сетевая ошибка: {e}. Перезапуск через 10 секунд...")
+            await asyncio.sleep(10)
+            # Останавливаем и пробуем снова
+            try:
+                await app.updater.stop()
+                await app.stop()
+                await app.shutdown()
+            except:
+                pass
+        except Exception as e:
+            logger.exception(f"Неизвестная ошибка: {e}. Перезапуск через 30 секунд...")
+            await asyncio.sleep(30)
+
+def main():
+    asyncio.run(run_bot())
+
 if __name__ == '__main__':
     main()
+
