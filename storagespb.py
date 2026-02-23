@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
-    raise ValueError("❌ Переменная окружения INVENTORY_BOT_TOKEN не задана!")
+    raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
 
 # ---------- Имя файла с данными ----------
 DATA_FILE = 'inventory.csv'
@@ -20,10 +20,15 @@ def clean_text(s):
     s = s.replace('\r', '').replace('\n', '').replace('\ufeff', '')
     return ' '.join(s.split())
 
+def normalize_art(s):
+    """Убирает дефисы и приводит к нижнему регистру для поиска."""
+    return s.replace('-', '').lower()
+
 # ---------- Загрузка данных из CSV ----------
-# Структура: словарь, где ключ - артикул (первая колонка), значение - список [доп_артикул, количество, цена]
-# Также для быстрого поиска можно хранить все строки в списке, но для изменения удобнее словарь.
-inventory = {}  # артикул -> [доп_артикул, количество, цена]
+# inventory: оригинальный артикул -> [доп_артикул, количество, цена]
+inventory = {}
+# art_norm_to_original: нормализованный артикул -> оригинальный артикул (для поиска)
+art_norm_to_original = {}
 
 try:
     with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -37,13 +42,13 @@ try:
                 except ValueError:
                     qty = 0
                 try:
-                    price = float(clean_text(row[3].replace(',', '.')))  # поддержка запятой как разделителя
+                    price = float(clean_text(row[3].replace(',', '.')))
                 except ValueError:
                     price = 0.0
-                if art:  # артикул не пустой
+                if art:
                     inventory[art] = [dop, qty, price]
+                    art_norm_to_original[normalize_art(art)] = art
 except FileNotFoundError:
-    # Если файла нет, создадим пустой словарь
     print(f"⚠️ Файл {DATA_FILE} не найден, будет создан при первом изменении.")
 except Exception as e:
     print(f"❌ Ошибка загрузки: {e}")
@@ -61,8 +66,9 @@ def save_inventory():
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "👋 Бот управления складом.\n"
-        "Команды:\n"
+        "👋 Бот складского учёта.\n\n"
+        "🔍 Просто отправьте артикул (например, AC-K171eh), и я покажу информацию о нём.\n\n"
+        "📦 Команды для изменения количества:\n"
         "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
         "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
         "Пример: добавить AC-K171eh, 5"
@@ -74,66 +80,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Регулярное выражение для команд: (добавить|убавить) артикул, число
-    match = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
-    if not match:
-        await update.message.reply_text("❌ Не понял команду. Используйте: добавить АРТИКУЛ, КОЛИЧЕСТВО или убавить АРТИКУЛ, КОЛИЧЕСТВО")
-        return
-
-    command = match.group(1).lower()
-    art = clean_text(match.group(2))
-    try:
-        delta = int(match.group(3))
-    except ValueError:
-        await update.message.reply_text("❌ Количество должно быть целым числом.")
-        return
-
-    if delta <= 0:
-        await update.message.reply_text("❌ Количество должно быть положительным.")
-        return
-
-    # Поиск артикула (без учёта регистра? Сейчас ищем точно, но можно добавить нормализацию)
-    # Для простоты ищем точное совпадение, но можно привести к нижнему регистру.
-    # Если нужно без учёта регистра, можно создать дополнительный словарь.
-    found = None
-    for key in inventory:
-        if key.lower() == art.lower():
-            found = key
-            break
-
-    if not found:
-        await update.message.reply_text(f"❌ Артикул '{art}' не найден.")
-        return
-
-    # Получаем текущие данные
-    dop, qty, price = inventory[found]
-
-    if command == 'добавить':
-        qty += delta
-        action = "добавлено"
-    else:  # убавить
-        if qty - delta < 0:
-            await update.message.reply_text(f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.")
+    # Проверяем, является ли сообщение командой изменения
+    match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
+    if match_cmd:
+        # Команда изменения количества
+        command = match_cmd.group(1).lower()
+        art_input = clean_text(match_cmd.group(2))
+        try:
+            delta = int(match_cmd.group(3))
+        except ValueError:
+            await update.message.reply_text("❌ Количество должно быть целым числом.")
             return
-        qty -= delta
-        action = "убавлено"
 
-    # Обновляем запись
-    inventory[found] = [dop, qty, price]
+        if delta <= 0:
+            await update.message.reply_text("❌ Количество должно быть положительным.")
+            return
 
-    # Сохраняем изменения в файл
-    try:
-        save_inventory()
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при сохранении: {e}")
+        # Нормализуем введённый артикул для поиска
+        norm_art = normalize_art(art_input)
+        if norm_art not in art_norm_to_original:
+            await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
+            return
+
+        original_art = art_norm_to_original[norm_art]
+        dop, qty, price = inventory[original_art]
+
+        if command == 'добавить':
+            qty += delta
+            action = "добавлено"
+        else:  # убавить
+            if qty - delta < 0:
+                await update.message.reply_text(
+                    f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.")
+                return
+            qty -= delta
+            action = "убавлено"
+
+        inventory[original_art] = [dop, qty, price]
+
+        # Сохраняем изменения
+        try:
+            save_inventory()
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка при сохранении: {e}")
+            return
+
+        price_str = f"{price:.2f}".replace('.', ',')
+        reply = (
+            f"✅ {action.capitalize()} {delta} ед. для артикула {original_art}.\n"
+            f"📦 Теперь количество: {qty}\n"
+            f"💰 Цена за единицу: {price_str}"
+        )
+        await update.message.reply_text(reply)
         return
 
-    # Формируем ответ
-    price_str = f"{price:.2f}".replace('.', ',')  # для красоты
+    # Если не команда, считаем запросом артикула
+    norm_art = normalize_art(text)
+    if norm_art not in art_norm_to_original:
+        await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
+        return
+
+    original_art = art_norm_to_original[norm_art]
+    dop, qty, price = inventory[original_art]
+
+    price_str = f"{price:.2f}".replace('.', ',')
     reply = (
-        f"✅ {action.capitalize()} {delta} ед. для артикула {found}.\n"
-        f"📦 Теперь количество: {qty}\n"
-        f"💰 Цена за единицу: {price_str}"
+        f"🔍 Артикул: {original_art}\n"
+        f"📎 Доп. артикул: {dop}\n"
+        f"📦 Количество: {qty}\n"
+        f"💰 Цена: {price_str}"
     )
     await update.message.reply_text(reply)
 
@@ -143,10 +158,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 Бот управления складом запущен...")
+    print("🚀 Бот складского учёта запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
-
     main()
-
