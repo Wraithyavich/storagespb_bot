@@ -25,10 +25,8 @@ def normalize_art(s):
     return s.replace('-', '').lower()
 
 # ---------- Загрузка данных из CSV ----------
-# inventory: оригинальный артикул -> [доп_артикул, количество, цена]
-inventory = {}
-# art_norm_to_original: нормализованный артикул -> оригинальный артикул (для поиска)
-art_norm_to_original = {}
+inventory = {}               # оригинальный артикул -> [доп_артикул, количество, цена (строка)]
+art_norm_to_original = {}    # нормализованный артикул -> оригинальный артикул
 
 try:
     with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -41,10 +39,7 @@ try:
                     qty = int(clean_text(row[2]))
                 except ValueError:
                     qty = 0
-                try:
-                    price = float(clean_text(row[3].replace(',', '.')))
-                except ValueError:
-                    price = 0.0
+                price = clean_text(row[3])   # оставляем как строку, без преобразования
                 if art:
                     inventory[art] = [dop, qty, price]
                     art_norm_to_original[normalize_art(art)] = art
@@ -83,7 +78,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, является ли сообщение командой изменения
     match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
     if match_cmd:
-        # Команда изменения количества
         command = match_cmd.group(1).lower()
         art_input = clean_text(match_cmd.group(2))
         try:
@@ -96,7 +90,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        # Нормализуем введённый артикул для поиска
         norm_art = normalize_art(art_input)
         if norm_art not in art_norm_to_original:
             await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
@@ -118,18 +111,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         inventory[original_art] = [dop, qty, price]
 
-        # Сохраняем изменения
         try:
             save_inventory()
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка при сохранении: {e}")
             return
 
-        price_str = f"{price:.2f}".replace('.', ',')
         reply = (
             f"✅ {action.capitalize()} {delta} ед. для артикула {original_art}.\n"
             f"📦 Теперь количество: {qty}\n"
-            f"💰 Цена за единицу: {price_str}"
+            f"💰 Цена за единицу: {price}"
         )
         await update.message.reply_text(reply)
         return
@@ -143,12 +134,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     original_art = art_norm_to_original[norm_art]
     dop, qty, price = inventory[original_art]
 
-    price_str = f"{price:.2f}".replace('.', ',')
     reply = (
         f"🔍 Артикул: {original_art}\n"
         f"📎 Доп. артикул: {dop}\n"
         f"📦 Количество: {qty}\n"
-        f"💰 Цена: {price_str}"
+        f"💰 Цена: {price}"
     )
     await update.message.reply_text(reply)
 
