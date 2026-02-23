@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
-    raise ValueError("❌ Переменная окружения INVENTORY_BOT_TOKEN не задана!")
+    raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
 
 # ---------- Список разрешенных пользователей ----------
 ALLOWED_IDS_STR = os.environ.get('ALLOWED_IDS', '')
@@ -149,7 +149,7 @@ def get_last_changes(n=5):
 
 # ---------- Функции поиска в каталоге ----------
 def find_catalog_arts(query):
-    """Возвращает множество оригинальных артикулов из каталога, соответствующих запросу (точное или частичное)"""
+    """Возвращает множество оригинальных артикулов из каталога, соответствующих запросу (частичное совпадение)"""
     norm_query = normalize_art(query)
     if len(norm_query) < MIN_SEARCH_LENGTH:
         return set()
@@ -284,22 +284,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        # Поиск артикула (сначала точный, потом частичный)
+        # Поиск артикула на складе (точное совпадение нормализованного)
         norm_art = normalize_art(art_input)
-        original_art = None
         if norm_art in stock_norm_to_art:
             original_art = stock_norm_to_art[norm_art]
         else:
-            # Ищем в каталоге и берём первый попавшийся? Но для резерва нужен артикул из inventory
-            # Лучше показать варианты и попросить уточнить
-            candidates = [a for a in inventory if normalize_art(a) == norm_art]  # точное совпадение нормализованного
+            candidates = [a for a in inventory if normalize_art(a) == norm_art]
             if not candidates:
                 await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.")
                 return
             if len(candidates) == 1:
                 original_art = candidates[0]
             else:
-                # несколько кандидатов
+                # несколько кандидатов (редко)
                 lines = [format_catalog_art(art) for art in candidates]
                 reply = "🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines)
                 await update.message.reply_text(reply)
@@ -481,16 +478,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.")
         return
 
-    if len(arts) == 1:
-        art = next(iter(arts))
-        reply = format_catalog_art(art)
-    else:
-        # Сортируем и показываем все найденные
-        sorted_arts = sorted(arts)
-        lines = [format_catalog_art(art) for art in sorted_arts]
-        reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
+    sorted_arts = sorted(arts)
+    total = len(sorted_arts)
 
-    await update.message.reply_text(reply)
+    if total == 1:
+        reply = format_catalog_art(sorted_arts[0])
+        await update.message.reply_text(reply)
+    else:
+        # Отправляем не более 10 артикулов, чтобы не превысить лимит сообщения
+        MAX_DISPLAY = 10
+        await update.message.reply_text(f"🔍 Найдено артикулов: {total}. Показываю первые {MAX_DISPLAY}:")
+        shown = 0
+        for art in sorted_arts:
+            if shown >= MAX_DISPLAY:
+                break
+            await update.message.reply_text(format_catalog_art(art))
+            shown += 1
+        if total > MAX_DISPLAY:
+            await update.message.reply_text(f"... и ещё {total - MAX_DISPLAY} артикулов. Уточните запрос.")
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
@@ -507,4 +512,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
