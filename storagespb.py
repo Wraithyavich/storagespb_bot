@@ -275,7 +275,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting'] = 'unreserve'
             return
 
-        # Обработка кнопок с артикулом (например, add_art)
         if data.startswith("add_"):
             art = data[4:]
             await query.edit_message_text(f"➕ Введите количество для добавления к {art}:", reply_markup=get_back_keyboard())
@@ -313,9 +312,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get('awaiting')
     if awaiting:
         del context.user_data['awaiting']
-        # Обработка ожидаемых команд (аналогично предыдущей логике, но с учётом артикула из awaiting)
+
+        # ---------- Поиск по артикулу ----------
         if awaiting == 'search':
-            # Поиск
             arts = find_catalog_arts(text)
             if not arts:
                 await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_back_keyboard())
@@ -330,24 +329,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await update.message.reply_text(reply, reply_markup=get_back_keyboard())
             else:
-                MAX_DISPLAY = 10
-                await update.message.reply_text(f"🔍 Найдено артикулов: {total}. Показываю первые {MAX_DISPLAY}:")
-                shown = 0
-                for art in sorted_arts:
-                    if shown >= MAX_DISPLAY:
-                        break
-                    await update.message.reply_text(format_catalog_art(art))
-                    shown += 1
-                if total > MAX_DISPLAY:
-                    await update.message.reply_text(f"... и ещё {total - MAX_DISPLAY} артикулов. Уточните запрос.", reply_markup=get_back_keyboard())
+                # Отправляем все найденные артикулы в одном сообщении (макс 10)
+                lines = [format_catalog_art(art) for art in sorted_arts[:10]]
+                full_message = "\n\n".join(lines)
+                if total > 10:
+                    full_message += f"\n\n... и ещё {total-10} артикулов. Уточните запрос."
+                await update.message.reply_text(full_message, reply_markup=get_back_keyboard())
             return
 
-        # Админские команды
+        # ---------- Админские команды (полный формат) ----------
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("⛔ У вас нет прав.")
             return
 
-        # Добавить
+        # Добавить (полная команда)
         if awaiting == 'add':
             match = re.match(r'^добавить\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
             if not match:
@@ -362,7 +357,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if delta <= 0:
                 await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
                 return
-            # Поиск артикула
+            # Поиск артикула на складе
             norm_art = normalize_art(art_input)
             if norm_art in stock_norm_to_art:
                 original_art = stock_norm_to_art[norm_art]
@@ -390,10 +385,167 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply, reply_markup=get_back_keyboard())
             return
 
-        # Убавить (аналогично, можно реализовать по шаблону)
-        # Для краткости оставлю как заглушку — нужно дописать все команды аналогично
+        # Убавить (полная команда)
+        if awaiting == 'remove':
+            match = re.match(r'^убавить\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
+            if not match:
+                await update.message.reply_text("❌ Неверный формат. Используйте: убавить АРТИКУЛ, КОЛИЧЕСТВО", reply_markup=get_back_keyboard())
+                return
+            art_input = clean_text(match.group(1))
+            try:
+                delta = int(match.group(2))
+            except ValueError:
+                await update.message.reply_text("❌ Количество должно быть целым числом.", reply_markup=get_back_keyboard())
+                return
+            if delta <= 0:
+                await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
+                return
+            norm_art = normalize_art(art_input)
+            if norm_art in stock_norm_to_art:
+                original_art = stock_norm_to_art[norm_art]
+            else:
+                candidates = [a for a in inventory if normalize_art(a) == norm_art]
+                if not candidates:
+                    await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.", reply_markup=get_back_keyboard())
+                    return
+                if len(candidates) == 1:
+                    original_art = candidates[0]
+                else:
+                    lines = [format_catalog_art(art) for art in candidates]
+                    await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
+                    return
+            dop, qty, price = inventory[original_art]
+            if qty - delta < 0:
+                await update.message.reply_text(f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.", reply_markup=get_back_keyboard())
+                return
+            qty -= delta
+            inventory[original_art] = [dop, qty, price]
+            save_inventory()
+            log_change(user_id, "убавлено", original_art, delta, qty)
+            art_reserves = reserves.get(original_art, [])
+            total_reserved = sum(r['qty'] for r in art_reserves)
+            available = qty - total_reserved
+            actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+            reply = f"✅ Убавлено {delta} ед. для артикула {original_art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
+            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            return
 
-        # Если awaiting содержит артикул (например, add_art)
+        # Отложить (полная команда)
+        if awaiting == 'reserve':
+            match = re.match(r'^отложить\s+([^,]+?)\s*,\s*(\d+)\s*,\s*(.+)$', text, re.IGNORECASE)
+            if not match:
+                await update.message.reply_text("❌ Неверный формат. Используйте: отложить АРТИКУЛ, КОЛИЧЕСТВО, КЛИЕНТ", reply_markup=get_back_keyboard())
+                return
+            art_input = clean_text(match.group(1))
+            try:
+                qty_reserve = int(match.group(2))
+            except ValueError:
+                await update.message.reply_text("❌ Количество должно быть целым числом.", reply_markup=get_back_keyboard())
+                return
+            client = clean_text(match.group(3))
+            if qty_reserve <= 0:
+                await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
+                return
+            norm_art = normalize_art(art_input)
+            if norm_art in stock_norm_to_art:
+                original_art = stock_norm_to_art[norm_art]
+            else:
+                candidates = [a for a in inventory if normalize_art(a) == norm_art]
+                if not candidates:
+                    await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.", reply_markup=get_back_keyboard())
+                    return
+                if len(candidates) == 1:
+                    original_art = candidates[0]
+                else:
+                    lines = [format_catalog_art(art) for art in candidates]
+                    await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
+                    return
+            dop, current_qty, price = inventory[original_art]
+            total_reserved = sum(r['qty'] for r in reserves.get(original_art, []))
+            available = current_qty - total_reserved
+            if qty_reserve > available:
+                await update.message.reply_text(f"❌ Недостаточно свободного товара. Доступно: {available} (всего {current_qty}, зарезервировано {total_reserved}).", reply_markup=get_back_keyboard())
+                return
+            if original_art not in reserves:
+                reserves[original_art] = []
+            reserves[original_art].append({"client": client, "qty": qty_reserve})
+            save_reserves(reserves)
+            actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+            reply = f"✅ Зарезервировано {qty_reserve} ед. для '{client}' по артикулу {original_art}.\n📦 Доступно на складе: {available - qty_reserve} (всего {current_qty}, зарезервировано {total_reserved + qty_reserve})\n👤 Резерв создал: {actor_name}"
+            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            return
+
+        # Снять резерв (полная команда)
+        if awaiting == 'unreserve':
+            match = re.match(r'^снять\s+([^,]+?)\s*,\s*([^,]+?)(?:\s*,\s*(\d+))?$', text, re.IGNORECASE)
+            if not match:
+                await update.message.reply_text("❌ Неверный формат. Используйте: снять АРТИКУЛ, КЛИЕНТ [КОЛИЧЕСТВО]", reply_markup=get_back_keyboard())
+                return
+            art_input = clean_text(match.group(1))
+            client = clean_text(match.group(2))
+            qty_to_remove = match.group(3)
+            if qty_to_remove is not None:
+                try:
+                    qty_to_remove = int(qty_to_remove)
+                    if qty_to_remove <= 0:
+                        await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
+                        return
+                except ValueError:
+                    await update.message.reply_text("❌ Количество должно быть целым числом.", reply_markup=get_back_keyboard())
+                    return
+            else:
+                qty_to_remove = None
+            norm_art = normalize_art(art_input)
+            if norm_art in stock_norm_to_art:
+                original_art = stock_norm_to_art[norm_art]
+            else:
+                candidates = [a for a in inventory if normalize_art(a) == norm_art]
+                if not candidates:
+                    await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.", reply_markup=get_back_keyboard())
+                    return
+                if len(candidates) == 1:
+                    original_art = candidates[0]
+                else:
+                    lines = [format_catalog_art(art) for art in candidates]
+                    await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
+                    return
+            if original_art not in reserves or not reserves[original_art]:
+                await update.message.reply_text(f"❌ По артикулу {original_art} нет резервов.", reply_markup=get_back_keyboard())
+                return
+            client_reserves = [r for r in reserves[original_art] if r['client'].lower() == client.lower()]
+            if not client_reserves:
+                await update.message.reply_text(f"❌ Для артикула {original_art} нет резерва для клиента '{client}'.", reply_markup=get_back_keyboard())
+                return
+            if qty_to_remove is None:
+                removed_total = sum(r['qty'] for r in client_reserves)
+                reserves[original_art] = [r for r in reserves[original_art] if r['client'].lower() != client.lower()]
+                action_msg = f"✅ Снят весь резерв ({removed_total} ед.) для клиента '{client}' по артикулу {original_art}."
+            else:
+                found = False
+                for i, r in enumerate(reserves[original_art]):
+                    if r['client'].lower() == client.lower() and r['qty'] >= qty_to_remove:
+                        r['qty'] -= qty_to_remove
+                        if r['qty'] == 0:
+                            del reserves[original_art][i]
+                        found = True
+                        break
+                if not found:
+                    await update.message.reply_text(f"❌ Нет резерва для '{client}' с количеством >= {qty_to_remove}.", reply_markup=get_back_keyboard())
+                    return
+                action_msg = f"✅ Снято {qty_to_remove} ед. из резерва для клиента '{client}' по артикулу {original_art}."
+                reserves[original_art] = [r for r in reserves[original_art] if r['qty'] > 0]
+            if not reserves[original_art]:
+                del reserves[original_art]
+            save_reserves(reserves)
+            dop, current_qty, price = inventory[original_art]
+            total_reserved = sum(r['qty'] for r in reserves.get(original_art, []))
+            available = current_qty - total_reserved
+            actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+            reply = f"{action_msg}\n📦 Теперь по артикулу {original_art}: всего {current_qty}, доступно {available}, зарезервировано {total_reserved}\n👤 Действие выполнил: {actor_name}"
+            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            return
+
+        # ---------- Команды с предопределённым артикулом (из кнопок) ----------
         if awaiting.startswith('add_'):
             art = awaiting[4:]
             try:
@@ -420,13 +572,130 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply, reply_markup=get_back_keyboard())
             return
 
-        # Аналогично для remove_, reserve_, unreserve_
+        if awaiting.startswith('remove_'):
+            art = awaiting[7:]
+            try:
+                delta = int(text)
+            except ValueError:
+                await update.message.reply_text("❌ Количество должно быть целым числом.", reply_markup=get_back_keyboard())
+                return
+            if delta <= 0:
+                await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
+                return
+            if art not in inventory:
+                await update.message.reply_text(f"❌ Артикул '{art}' не найден на складе.", reply_markup=get_back_keyboard())
+                return
+            dop, qty, price = inventory[art]
+            if qty - delta < 0:
+                await update.message.reply_text(f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.", reply_markup=get_back_keyboard())
+                return
+            qty -= delta
+            inventory[art] = [dop, qty, price]
+            save_inventory()
+            log_change(user_id, "убавлено", art, delta, qty)
+            art_reserves = reserves.get(art, [])
+            total_reserved = sum(r['qty'] for r in art_reserves)
+            available = qty - total_reserved
+            actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+            reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
+            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            return
 
-        # Если ничего не подошло, просто показываем кнопки
+        if awaiting.startswith('reserve_'):
+            art = awaiting[8:]
+            parts = [p.strip() for p in text.split(',')]
+            if len(parts) != 2:
+                await update.message.reply_text("❌ Введите количество и клиента через запятую.", reply_markup=get_back_keyboard())
+                return
+            try:
+                qty_reserve = int(parts[0])
+            except ValueError:
+                await update.message.reply_text("❌ Количество должно быть целым числом.", reply_markup=get_back_keyboard())
+                return
+            client = parts[1]
+            if qty_reserve <= 0:
+                await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
+                return
+            if art not in inventory:
+                await update.message.reply_text(f"❌ Артикул '{art}' не найден на складе.", reply_markup=get_back_keyboard())
+                return
+            dop, current_qty, price = inventory[art]
+            total_reserved = sum(r['qty'] for r in reserves.get(art, []))
+            available = current_qty - total_reserved
+            if qty_reserve > available:
+                await update.message.reply_text(f"❌ Недостаточно свободного товара. Доступно: {available} (всего {current_qty}, зарезервировано {total_reserved}).", reply_markup=get_back_keyboard())
+                return
+            if art not in reserves:
+                reserves[art] = []
+            reserves[art].append({"client": client, "qty": qty_reserve})
+            save_reserves(reserves)
+            actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+            reply = f"✅ Зарезервировано {qty_reserve} ед. для '{client}' по артикулу {art}.\n📦 Доступно на складе: {available - qty_reserve} (всего {current_qty}, зарезервировано {total_reserved + qty_reserve})\n👤 Резерв создал: {actor_name}"
+            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            return
+
+        if awaiting.startswith('unreserve_'):
+            art = awaiting[10:]
+            parts = text.split(',')
+            if len(parts) == 1:
+                client = parts[0].strip()
+                qty_to_remove = None
+            elif len(parts) == 2:
+                client = parts[0].strip()
+                try:
+                    qty_to_remove = int(parts[1].strip())
+                    if qty_to_remove <= 0:
+                        await update.message.reply_text("❌ Количество должно быть положительным.", reply_markup=get_back_keyboard())
+                        return
+                except ValueError:
+                    await update.message.reply_text("❌ Количество должно быть целым числом.", reply_markup=get_back_keyboard())
+                    return
+            else:
+                await update.message.reply_text("❌ Неверный формат. Используйте: клиент или клиент, количество", reply_markup=get_back_keyboard())
+                return
+            if art not in inventory:
+                await update.message.reply_text(f"❌ Артикул '{art}' не найден на складе.", reply_markup=get_back_keyboard())
+                return
+            if art not in reserves or not reserves[art]:
+                await update.message.reply_text(f"❌ По артикулу {art} нет резервов.", reply_markup=get_back_keyboard())
+                return
+            client_reserves = [r for r in reserves[art] if r['client'].lower() == client.lower()]
+            if not client_reserves:
+                await update.message.reply_text(f"❌ Для артикула {art} нет резерва для клиента '{client}'.", reply_markup=get_back_keyboard())
+                return
+            if qty_to_remove is None:
+                removed_total = sum(r['qty'] for r in client_reserves)
+                reserves[art] = [r for r in reserves[art] if r['client'].lower() != client.lower()]
+                action_msg = f"✅ Снят весь резерв ({removed_total} ед.) для клиента '{client}' по артикулу {art}."
+            else:
+                found = False
+                for i, r in enumerate(reserves[art]):
+                    if r['client'].lower() == client.lower() and r['qty'] >= qty_to_remove:
+                        r['qty'] -= qty_to_remove
+                        if r['qty'] == 0:
+                            del reserves[art][i]
+                        found = True
+                        break
+                if not found:
+                    await update.message.reply_text(f"❌ Нет резерва для '{client}' с количеством >= {qty_to_remove}.", reply_markup=get_back_keyboard())
+                    return
+                action_msg = f"✅ Снято {qty_to_remove} ед. из резерва для клиента '{client}' по артикулу {art}."
+                reserves[art] = [r for r in reserves[art] if r['qty'] > 0]
+            if not reserves[art]:
+                del reserves[art]
+            save_reserves(reserves)
+            dop, current_qty, price = inventory[art]
+            total_reserved = sum(r['qty'] for r in reserves.get(art, []))
+            available = current_qty - total_reserved
+            actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+            reply = f"{action_msg}\n📦 Теперь по артикулу {art}: всего {current_qty}, доступно {available}, зарезервировано {total_reserved}\n👤 Действие выполнил: {actor_name}"
+            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            return
+
         await update.message.reply_text("Неизвестная команда.", reply_markup=get_back_keyboard())
         return
 
-    # Если нет ожидания, обрабатываем как поиск
+    # ---------- Если нет ожидания, обрабатываем как поиск ----------
     arts = find_catalog_arts(text)
     if not arts:
         await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_back_keyboard())
@@ -441,16 +710,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(reply, reply_markup=get_back_keyboard())
     else:
-        MAX_DISPLAY = 10
-        await update.message.reply_text(f"🔍 Найдено артикулов: {total}. Показываю первые {MAX_DISPLAY}:")
-        shown = 0
-        for art in sorted_arts:
-            if shown >= MAX_DISPLAY:
-                break
-            await update.message.reply_text(format_catalog_art(art))
-            shown += 1
-        if total > MAX_DISPLAY:
-            await update.message.reply_text(f"... и ещё {total - MAX_DISPLAY} артикулов. Уточните запрос.", reply_markup=get_back_keyboard())
+        lines = [format_catalog_art(art) for art in sorted_arts[:10]]
+        full_message = "\n\n".join(lines)
+        if total > 10:
+            full_message += f"\n\n... и ещё {total-10} артикулов. Уточните запрос."
+        await update.message.reply_text(full_message, reply_markup=get_back_keyboard())
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
