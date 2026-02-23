@@ -216,9 +216,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_admin = user_id in ADMIN_IDS
     welcome_text = "👋 Добро пожаловать! Выберите действие:"
-    # Сохраняем ID сообщения с главным меню, чтобы потом не дублировать
-    sent_msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(is_admin))
-    context.user_data['main_menu_msg_id'] = sent_msg.message_id
+    await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(is_admin))
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -231,18 +229,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     is_admin = user_id in ADMIN_IDS
 
-    # Возврат в главное меню – если сообщение с кнопками уже есть, не дублируем
+    # Возврат в главное меню – просто отправляем новое сообщение, не редактируем текущее
     if data == "back_to_main":
         context.user_data.pop('awaiting', None)
-        main_menu_id = context.user_data.get('main_menu_msg_id')
-        if main_menu_id and query.message.message_id != main_menu_id:
-            # Удаляем текущее сообщение
-            await query.message.delete()
-            # Отправляем новое главное меню? Нет, оставляем старое.
-            # Просто ничего не делаем, главное меню уже существует.
-            return
-        else:
-            await query.edit_message_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
+        await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
         return
 
     if data == "search":
