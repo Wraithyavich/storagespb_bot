@@ -65,7 +65,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команды:\n"
         "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
         "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
-        "Пример: добавить ABC-123, 5"
+        "Пример: добавить AC-K171eh, 5"
     )
     await update.message.reply_text(welcome_text)
 
@@ -149,3 +149,4 @@ def main():
 if __name__ == '__main__':
 
     main()
+
