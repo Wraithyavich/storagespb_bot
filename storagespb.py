@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ---------- Получение токена из переменной окружения ----------
-API_TOKEN = os.environ.get('INVENTORY_BOT_TOKEN')
+API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
     raise ValueError("❌ Переменная окружения INVENTORY_BOT_TOKEN не задана!")
 
@@ -147,4 +147,5 @@ def main():
     app.run_polling()
 
 if __name__ == '__main__':
+
     main()
