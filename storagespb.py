@@ -149,7 +149,6 @@ def get_last_changes(n=40):
     week_ago = datetime.now() - timedelta(days=7)
     filtered = []
     for line in lines:
-        # Парсим дату из начала строки: [2023-01-01 12:34:56] ...
         match = re.match(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*', line)
         if match:
             dt_str = match.group(1)
@@ -157,7 +156,6 @@ def get_last_changes(n=40):
             if dt >= week_ago:
                 filtered.append(line)
         else:
-            # Если не удалось распарсить, считаем, что запись старая и не включаем? Лучше включить для надёжности.
             filtered.append(line)
     return filtered[-n:]
 
@@ -178,7 +176,6 @@ def clean_old_logs():
             if dt >= week_ago:
                 new_lines.append(line)
         else:
-            # Если дата не распознана, оставляем (на всякий случай)
             new_lines.append(line)
     with open(LOG_FILE, mode='w', encoding='utf-8') as f:
         f.writelines(new_lines)
@@ -219,7 +216,6 @@ def is_allowed(user_id):
 # ---------- Функции для создания клавиатур ----------
 def get_main_keyboard(is_admin):
     keyboard = [
-        # Кнопка поиска убрана
         [InlineKeyboardButton("📋 Резервы", callback_data="reserves"),
          InlineKeyboardButton("📜 Последние изменения", callback_data="last")]
     ]
@@ -274,8 +270,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Возврат в главное меню
     if data == "back_to_main":
-        context.user_data.clear()  # сбрасываем все диалоги
+        context.user_data.clear()
         await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
+        return
+
+    # Другое количество (при резервировании)
+    if data == "reserve_retry_qty":
+        # Просто удаляем сообщение с ошибкой, состояние ожидания остаётся
+        await query.message.delete()
+        return
+
+    # Добавление позиции в резерв (после ввода цены)
+    if data == "reserve_add_another":
+        await query.edit_message_text("🕒 Введите следующий артикул для резервирования:", reply_markup=get_back_keyboard())
+        context.user_data['awaiting'] = 'reserve_art'
+        return
+    if data == "reserve_finish":
+        # Завершаем резервирование, сохраняем все позиции
+        items = context.user_data.get('reserve_items', [])
+        client = context.user_data.get('reserve_client')
+        if not client:
+            await query.edit_message_text("🕒 Введите имя клиента для всех позиций:", reply_markup=get_back_keyboard())
+            context.user_data['awaiting'] = 'reserve_client'
+            return
+        else:
+            for art, qty, price in items:
+                if art not in reserves:
+                    reserves[art] = []
+                reserves[art].append({"client": client, "qty": qty, "price": price})
+            save_reserves(reserves)
+            lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
+            await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
+            context.user_data.pop('awaiting', None)
+            context.user_data.pop('reserve_items', None)
+            context.user_data.pop('reserve_client', None)
         return
 
     if data == "reserves":
@@ -291,7 +319,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "last":
-        clean_old_logs()  # очищаем старые записи перед показом
+        clean_old_logs()
         lines = get_last_changes(40)
         if not lines:
             await query.edit_message_text("Нет записей об изменениях за последние 7 дней.", reply_markup=get_back_keyboard())
@@ -315,8 +343,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "reserve":
         await query.edit_message_text("🕒 Введите артикул для резервирования:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_art'
-        # Для резерва будем хранить временные данные
-        context.user_data['reserve_items'] = []  # список кортежей (артикул, количество, цена)
+        context.user_data['reserve_items'] = []
         context.user_data['reserve_client'] = None
         return
     if data == "unreserve":
@@ -360,11 +387,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     awaiting = context.user_data.get('awaiting')
     if awaiting:
-        # Обработка многошаговых диалогов
         await handle_dialog_input(update, context, text, awaiting)
         return
 
-    # ---------- Если нет ожидания, обрабатываем как поиск ----------
+    # Поиск по каталогу
     arts = find_catalog_arts(text)
     if not arts:
         await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_back_keyboard())
@@ -394,7 +420,6 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # ---------- Добавление ----------
     if awaiting == 'add_art':
-        # Проверяем, существует ли артикул на складе
         norm_art = normalize_art(text)
         if norm_art in stock_norm_to_art:
             art = stock_norm_to_art[norm_art]
@@ -498,9 +523,8 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('awaiting', None)
         return
 
-    # ---------- Резервирование (многошаговое с возможностью нескольких позиций) ----------
+    # ---------- Резервирование (многошаговое) ----------
     if awaiting == 'reserve_art':
-        # Проверяем артикул на складе
         norm_art = normalize_art(text)
         if norm_art in stock_norm_to_art:
             art = stock_norm_to_art[norm_art]
@@ -517,7 +541,6 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
                 context.user_data.pop('awaiting', None)
                 return
-        # Сохраняем текущий артикул
         context.user_data['reserve_current_art'] = art
         await update.message.reply_text(f"🕒 Введите количество для резервирования {art}:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_qty'
@@ -537,12 +560,20 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_back_keyboard())
             context.user_data.pop('awaiting', None)
             return
-        # Проверяем доступное количество
         dop, current_qty, price = inventory[art]
         total_reserved = sum(r['qty'] for r in reserves.get(art, []))
         available = current_qty - total_reserved
         if qty > available:
-            await update.message.reply_text(f"❌ Недостаточно свободного товара. Доступно: {available} (всего {current_qty}, зарезервировано {total_reserved}).", reply_markup=get_back_keyboard())
+            # Предлагаем ввести другое количество или отменить
+            keyboard = [
+                [InlineKeyboardButton("🔄 Другое количество", callback_data="reserve_retry_qty")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")]
+            ]
+            await update.message.reply_text(
+                f"❌ Недостаточно свободного товара. Доступно: {available} (всего {current_qty}, зарезервировано {total_reserved}).\nВы можете ввести другое количество или отменить операцию.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            # await не сбрасываем, остаёмся в ожидании reserve_qty
             return
         context.user_data['reserve_current_qty'] = qty
         await update.message.reply_text(f"🕒 Введите цену за единицу для {art}:", reply_markup=get_back_keyboard())
@@ -550,7 +581,6 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if awaiting == 'reserve_price':
-        # Цена может быть с запятой или точкой
         try:
             price = float(text.replace(',', '.'))
         except ValueError:
@@ -562,11 +592,9 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка данных. Начните заново.", reply_markup=get_back_keyboard())
             context.user_data.pop('awaiting', None)
             return
-        # Сохраняем позицию во временный список
         items = context.user_data.get('reserve_items', [])
         items.append((art, qty, price))
         context.user_data['reserve_items'] = items
-        # Спрашиваем, хочет ли пользователь добавить ещё одну позицию
         keyboard = [
             [InlineKeyboardButton("✅ Да", callback_data="reserve_add_another"),
              InlineKeyboardButton("❌ Нет", callback_data="reserve_finish")]
@@ -575,9 +603,24 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data['awaiting'] = 'reserve_another'
         return
 
-    if awaiting == 'reserve_another':
-        # Обрабатывается через callback, но может быть и текст? В данном случае мы ожидаем callback, поэтому здесь ничего не делаем
-        pass
+    if awaiting == 'reserve_client':
+        client = text
+        items = context.user_data.get('reserve_items', [])
+        if not items:
+            await update.message.reply_text("❌ Нет позиций для сохранения. Начните заново.", reply_markup=get_back_keyboard())
+            context.user_data.pop('awaiting', None)
+            return
+        for art, qty, price in items:
+            if art not in reserves:
+                reserves[art] = []
+            reserves[art].append({"client": client, "qty": qty, "price": price})
+        save_reserves(reserves)
+        lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
+        await update.message.reply_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
+        context.user_data.pop('awaiting', None)
+        context.user_data.pop('reserve_items', None)
+        context.user_data.pop('reserve_client', None)
+        return
 
     # ---------- Снятие резерва ----------
     if awaiting == 'unreserve_art':
@@ -635,12 +678,10 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('awaiting', None)
             return
         if qty_to_remove is None:
-            # Снять весь резерв этого клиента
             removed_total = sum(r['qty'] for r in client_reserves)
             reserves[art] = [r for r in reserves[art] if r['client'].lower() != client.lower()]
             action_msg = f"✅ Снят весь резерв ({removed_total} ед.) для клиента '{client}' по артикулу {art}."
         else:
-            # Снять часть резерва
             found = False
             for i, r in enumerate(reserves[art]):
                 if r['client'].lower() == client.lower() and r['qty'] >= qty_to_remove:
@@ -666,63 +707,9 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('awaiting', None)
         return
 
-    # Обработка callback-ов для резерва (добавить ещё или закончить)
-    # Это будет в button_callback, но здесь может быть текст
-
-# Добавим обработку дополнительных callback-ов для резерва
-async def button_callback_reserve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data == "reserve_add_another":
-        # Продолжаем добавление для того же клиента
-        await query.edit_message_text("🕒 Введите следующий артикул для резервирования:", reply_markup=get_back_keyboard())
-        context.user_data['awaiting'] = 'reserve_art'
-        return
-    elif data == "reserve_finish":
-        # Завершаем резервирование, сохраняем все позиции
-        items = context.user_data.get('reserve_items', [])
-        client = context.user_data.get('reserve_client')
-        if not client:
-            # Если клиент ещё не введён, нужно его спросить
-            await query.edit_message_text("🕒 Введите имя клиента для всех позиций:", reply_markup=get_back_keyboard())
-            context.user_data['awaiting'] = 'reserve_client'
-            return
-        else:
-            # Сохраняем все позиции
-            for art, qty, price in items:
-                if art not in reserves:
-                    reserves[art] = []
-                reserves[art].append({"client": client, "qty": qty, "price": price})
-            save_reserves(reserves)
-            # Обновляем склад? Нет, резерв не меняет количество на складе, только уменьшает доступное.
-            # Можно показать итог
-            lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
-            await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
-            context.user_data.pop('awaiting', None)
-            context.user_data.pop('reserve_items', None)
-            context.user_data.pop('reserve_client', None)
-        return
-    elif data == "back_to_main":
-        # Обрабатывается в основном обработчике
-        pass
-
-# Объединяем обработчики callback
-# В основном button_callback мы уже обрабатываем back_to_main и другие. Добавим вызов reserve_callback при необходимости.
-
-# В основном button_callback нужно добавить обработку reserve_add_another и reserve_finish.
-# Для этого вставим их в начало или в соответствующее место.
-
-# Перепишем button_callback, включив туда логику для резерва.
-
-# Но чтобы не дублировать, лучше расширить существующий button_callback.
-
-# Я модифицирую button_callback, добавив обработку этих двух callback'ов.
-
-# В конце файла добавим вызов clean_old_logs при старте.
+    await update.message.reply_text("Неизвестная команда.", reply_markup=get_back_keyboard())
 
 def main():
-    # Очищаем старые логи при запуске
     clean_old_logs()
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
