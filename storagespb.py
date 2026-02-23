@@ -142,6 +142,14 @@ def log_change(user_id, action, art, delta, new_qty):
     with open(LOG_FILE, mode='a', encoding='utf-8') as f:
         f.write(log_line)
 
+def log_reserve_event(user_id, action, art, client, qty, price=None):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    name = USER_NAMES.get(user_id, str(user_id))
+    price_str = f", цена: {price}" if price is not None else ""
+    log_line = f"[{timestamp}] {name} (ID:{user_id}) {action} {qty} ед. артикула {art} для клиента {client}{price_str}\n"
+    with open(LOG_FILE, mode='a', encoding='utf-8') as f:
+        f.write(log_line)
+
 def get_last_changes(n=40):
     try:
         with open(LOG_FILE, mode='r', encoding='utf-8') as f:
@@ -235,7 +243,6 @@ def get_client_article_qty(client, art):
 
 def remove_client_reserves(client, art=None):
     """Удаляет резервы клиента. Если art указан, удаляет только для этого артикула, иначе все."""
-    to_delete = []
     if art:
         if art in reserves:
             reserves[art] = [r for r in reserves[art] if r['client'].lower() != client.lower()]
@@ -359,6 +366,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if art not in reserves:
                     reserves[art] = []
                 reserves[art].append({"client": client, "qty": qty, "price": price})
+                log_reserve_event(user_id, "зарезервировано", art, client, qty, price)
             save_reserves(reserves)
             lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
             await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
@@ -473,6 +481,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if qty == 1:
             # Снимаем сразу
             remove_partial_reserve(client, art, 1)
+            log_reserve_event(user_id, "снят резерв", art, client, 1)
             await query.edit_message_text(f"✅ Резерв для клиента {client} по артикулу {art} (1 ед.) снят.", reply_markup=get_back_keyboard())
             context.user_data.pop('unreserve_step', None)
         else:
@@ -490,6 +499,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Ошибка: не выбран клиент.", reply_markup=get_back_keyboard())
             return
         remove_client_reserves(client)
+        log_reserve_event(user_id, "сняты все резервы", "", client, 0)
         await query.edit_message_text(f"✅ Все резервы клиента {client} сняты.", reply_markup=get_back_keyboard())
         context.user_data.pop('unreserve_step', None)
         return
@@ -513,8 +523,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("unreserve_"):
         art = data[10:]
         # Прямой переход к снятию с конкретного артикула (из админской кнопки)
-        # Здесь можно сразу запросить клиента? Но по заданию мы хотим через выбор клиента. Для упрощения оставим старую логику или тоже через выбор клиента.
-        # Пока оставим старую логику для совместимости.
         await query.edit_message_text(f"❌ Введите клиента для снятия резерва с {art} (или клиент, количество):", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"unreserve_data_{art}"
         return
@@ -764,6 +772,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if art not in reserves:
                 reserves[art] = []
             reserves[art].append({"client": client, "qty": qty, "price": price})
+            log_reserve_event(user_id, "зарезервировано", art, client, qty, price)
         save_reserves(reserves)
         lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
         await update.message.reply_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
@@ -796,6 +805,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await update.message.reply_text("❌ Введите целое число или 'все'.", reply_markup=get_back_keyboard())
                 return
         if remove_partial_reserve(client, art, qty_to_remove):
+            log_reserve_event(user_id, "снято", art, client, qty_to_remove)
             await update.message.reply_text(f"✅ Снято {qty_to_remove} ед. резерва клиента {client} по артикулу {art}.", reply_markup=get_back_keyboard())
         else:
             await update.message.reply_text("❌ Ошибка при снятии резерва.", reply_markup=get_back_keyboard())
@@ -840,9 +850,11 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not reserves[art]:
                 del reserves[art]
             save_reserves(reserves)
+            log_reserve_event(user_id, "снят весь резерв", art, client, removed_total)
             action_msg = f"✅ Снят весь резерв ({removed_total} ед.) для клиента '{client}' по артикулу {art}."
         else:
             if remove_partial_reserve(client, art, qty_to_remove):
+                log_reserve_event(user_id, "снято", art, client, qty_to_remove)
                 action_msg = f"✅ Снято {qty_to_remove} ед. из резерва для клиента '{client}' по артикулу {art}."
             else:
                 await update.message.reply_text("❌ Не удалось снять резерв.", reply_markup=get_back_keyboard())
