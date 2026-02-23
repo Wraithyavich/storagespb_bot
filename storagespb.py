@@ -32,6 +32,10 @@ if ADMIN_IDS_STR:
     except ValueError:
         print("⚠️ Ошибка парсинга ADMIN_IDS")
 
+# ---------- Проверка доступа ----------
+def is_allowed(user_id):
+    return user_id in ALLOWED_IDS
+
 # ---------- Имена пользователей ----------
 USER_NAMES = {
     1219230738: "Савелий",
