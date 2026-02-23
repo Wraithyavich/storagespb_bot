@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
-    raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
+    raise ValueError("❌ Переменная окружения INVENTORY_BOT_TOKEN не задана!")
 
 # ---------- Имя файла с данными ----------
 DATA_FILE = 'inventory.csv'
@@ -22,8 +22,15 @@ def clean_text(s):
     return ' '.join(s.split())
 
 def normalize_art(s):
-    """Убирает дефисы и приводит к нижнему регистру для поиска."""
-    return s.replace('-', '').lower()
+    """
+    Приводит строку к нижнему регистру и удаляет всё, кроме букв и цифр.
+    Это позволяет находить артикулы независимо от наличия дефисов, точек, слешей и т.п.
+    """
+    # сначала приводим к нижнему регистру
+    s = s.lower()
+    # удаляем все символы, не являющиеся буквами или цифрами
+    s = re.sub(r'[^a-z0-9]', '', s)
+    return s
 
 # ---------- Загрузка данных из CSV ----------
 inventory = {}               # оригинальный артикул -> [доп_артикул, количество, цена (строка)]
@@ -41,8 +48,8 @@ try:
                     qty = int(clean_text(row[2]))
                 except ValueError:
                     qty = 0
-                price = clean_text(row[3])
-                if art:
+                price = clean_text(row[3])  # оставляем как есть, включая пробелы и т.д.
+                if art:  # артикул не должен быть пустым
                     inventory[art] = [dop, qty, price]
                     art_norm_to_original[normalize_art(art)] = art
                     if dop:
@@ -53,6 +60,8 @@ except Exception as e:
     print(f"❌ Ошибка загрузки: {e}")
 
 print(f"✅ Загружено {len(inventory)} записей.")
+# Для отладки можно вывести первые несколько нормализованных ключей:
+# print("Примеры нормализованных артикулов:", list(art_norm_to_original.keys())[:10])
 
 # ---------- Сохранение данных в CSV ----------
 def save_inventory():
@@ -104,7 +113,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "👋 Бот складского учёта.\n\n"
         "🔍 Просто отправьте артикул (основной или дополнительный), и я покажу информацию о нём.\n"
-        f"Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n\n"
+        f"Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
+        "Регистр и разделители (дефисы, точки) не важны — я пойму.\n\n"
         "📦 Команды для изменения количества:\n"
         "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
         "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
