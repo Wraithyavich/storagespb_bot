@@ -6,25 +6,13 @@ from collections import defaultdict
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import asyncio
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.error import NetworkError, TimedOut
-from telegram.request import HTTPXRequest
 
-# ---------- Настройка логирования ----------
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
 # ---------- Получение токена из переменной окружения ----------
-API_TOKEN = os.environ.get('API_TOKEN')
+API_TOKEN = os.environ.get('INVENTORY_BOT_TOKEN')
 if API_TOKEN is None:
     raise ValueError("❌ Переменная окружения INVENTORY_BOT_TOKEN не задана!")
 
-# ---------- Список разрешенных пользователей (user_id) ----------
+# ---------- Список разрешенных пользователей ----------
 ALLOWED_IDS_STR = os.environ.get('ALLOWED_IDS', '')
 ALLOWED_IDS = set()
 if ALLOWED_IDS_STR:
@@ -32,9 +20,9 @@ if ALLOWED_IDS_STR:
         ALLOWED_IDS = set(int(id.strip()) for id in ALLOWED_IDS_STR.split(',') if id.strip())
         print(f"✅ Загружено {len(ALLOWED_IDS)} разрешенных пользователей")
     except ValueError:
-        print("⚠️ Ошибка парсинга ALLOWED_IDS, проверьте формат (числа через запятую)")
+        print("⚠️ Ошибка парсинга ALLOWED_IDS")
 
-# ---------- Список администраторов (user_id) ----------
+# ---------- Список администраторов ----------
 ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '')
 ADMIN_IDS = set()
 if ADMIN_IDS_STR:
@@ -42,7 +30,7 @@ if ADMIN_IDS_STR:
         ADMIN_IDS = set(int(id.strip()) for id in ADMIN_IDS_STR.split(',') if id.strip())
         print(f"✅ Загружено {len(ADMIN_IDS)} администраторов")
     except ValueError:
-        print("⚠️ Ошибка парсинга ADMIN_IDS, проверьте формат (числа через запятую)")
+        print("⚠️ Ошибка парсинга ADMIN_IDS")
 
 # ---------- Имена пользователей ----------
 USER_NAMES = {
@@ -51,10 +39,73 @@ USER_NAMES = {
     1995599290: "Настя"
 }
 
-# ---------- Файлы данных ----------
+# ---------- Константы ----------
+MIN_SEARCH_LENGTH = 2
 DATA_FILE = 'inventory.csv'
 LOG_FILE = 'last_changes.log'
 RESERVES_FILE = 'reserves.json'
+CATALOG_FILE = 'data.csv'  # файл первого бота (артикулы и доп. артикулы)
+
+# ---------- Очистка текста ----------
+def clean_text(s):
+    s = s.strip()
+    s = s.replace('\r', '').replace('\n', '').replace('\ufeff', '')
+    return ' '.join(s.split())
+
+def normalize_art(s):
+    """Убирает всё кроме букв и цифр, нижний регистр"""
+    s = s.lower()
+    s = re.sub(r'[^a-z0-9]', '', s)
+    return s
+
+# ---------- Загрузка складских данных (inventory.csv) ----------
+inventory = {}          # артикул -> [доп_артикул, количество, цена]
+stock_norm_to_art = {}  # нормализованный артикул -> оригинальный артикул (для склада)
+
+try:
+    with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
+        reader = csv.reader(file, delimiter=';')
+        for row in reader:
+            if len(row) >= 4:
+                art = clean_text(row[0])
+                dop = clean_text(row[1])
+                try:
+                    qty = int(clean_text(row[2]))
+                except ValueError:
+                    qty = 0
+                price = clean_text(row[3])
+                if art:
+                    inventory[art] = [dop, qty, price]
+                    stock_norm_to_art[normalize_art(art)] = art
+except FileNotFoundError:
+    print(f"⚠️ Файл {DATA_FILE} не найден, будет создан при первом изменении.")
+except Exception as e:
+    print(f"❌ Ошибка загрузки {DATA_FILE}: {e}")
+
+print(f"✅ Загружено {len(inventory)} складских записей.")
+
+# ---------- Загрузка каталога (data.csv) ----------
+catalog = defaultdict(list)      # ключ (оригинальный артикул) -> список доп. артикулов (из второго столбца)
+catalog_norm_to_original = defaultdict(list)  # нормализованный артикул (из первого или второго столбца) -> оригинальный артикул
+
+try:
+    with open(CATALOG_FILE, mode='r', encoding='utf-8-sig') as file:
+        reader = csv.reader(file, delimiter=';')
+        for row in reader:
+            if len(row) >= 2:
+                col1 = clean_text(row[0])
+                col2 = clean_text(row[1])
+                if col1:
+                    catalog[col1].append(col2)
+                    catalog_norm_to_original[normalize_art(col1)].append(col1)
+                if col2:
+                    catalog_norm_to_original[normalize_art(col2)].append(col1)
+except FileNotFoundError:
+    print(f"⚠️ Файл {CATALOG_FILE} не найден, поиск по каталогу недоступен.")
+except Exception as e:
+    print(f"❌ Ошибка загрузки {CATALOG_FILE}: {e}")
+
+print(f"✅ Загружено {len(catalog)} записей в каталоге.")
 
 # ---------- Загрузка резервов ----------
 def load_reserves():
@@ -73,47 +124,7 @@ def save_reserves(reserves):
 
 reserves = load_reserves()
 
-# ---------- Очистка текста ----------
-def clean_text(s):
-    s = s.strip()
-    s = s.replace('\r', '').replace('\n', '').replace('\ufeff', '')
-    return ' '.join(s.split())
-
-def normalize_art(s):
-    s = s.lower()
-    s = re.sub(r'[^a-z0-9]', '', s)
-    return s
-
-# ---------- Загрузка данных из CSV ----------
-inventory = {}
-art_norm_to_original = {}
-dop_norm_to_original = {}
-
-try:
-    with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
-        reader = csv.reader(file, delimiter=';')
-        for row in reader:
-            if len(row) >= 4:
-                art = clean_text(row[0])
-                dop = clean_text(row[1])
-                try:
-                    qty = int(clean_text(row[2]))
-                except ValueError:
-                    qty = 0
-                price = clean_text(row[3])
-                if art:
-                    inventory[art] = [dop, qty, price]
-                    art_norm_to_original[normalize_art(art)] = art
-                    if dop:
-                        dop_norm_to_original[normalize_art(dop)] = art
-except FileNotFoundError:
-    print(f"⚠️ Файл {DATA_FILE} не найден, будет создан при первом изменении.")
-except Exception as e:
-    print(f"❌ Ошибка загрузки: {e}")
-
-print(f"✅ Загружено {len(inventory)} записей.")
-
-# ---------- Сохранение данных в CSV ----------
+# ---------- Сохранение складских данных ----------
 def save_inventory():
     with open(DATA_FILE, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
@@ -136,45 +147,29 @@ def get_last_changes(n=5):
     except FileNotFoundError:
         return []
 
-# ---------- Функции поиска ----------
-def find_exact_original_art(query):
+# ---------- Функции поиска в каталоге ----------
+def find_catalog_arts(query):
+    """Возвращает множество оригинальных артикулов из каталога, соответствующих запросу (точное или частичное)"""
     norm_query = normalize_art(query)
-    if norm_query in art_norm_to_original:
-        return art_norm_to_original[norm_query]
-    if norm_query in dop_norm_to_original:
-        return dop_norm_to_original[norm_query]
-    return None
-
-def partial_search(query):
-    norm_query = normalize_art(query)
-    if len(norm_query) < 2:
-        return []
+    if len(norm_query) < MIN_SEARCH_LENGTH:
+        return set()
     results = set()
-    for norm_art, orig_art in art_norm_to_original.items():
+    for norm_art, orig_arts in catalog_norm_to_original.items():
         if norm_query in norm_art:
-            results.add(orig_art)
-    for norm_dop, orig_art in dop_norm_to_original.items():
-        if norm_query in norm_dop:
-            results.add(orig_art)
-    return sorted(results)
+            results.update(orig_arts)
+    return results
 
-def format_item_info(art):
-    dop, qty, price = inventory[art]
-    art_reserves = reserves.get(art, [])
-    total_reserved = sum(r['qty'] for r in art_reserves)
-    available = qty - total_reserved
-    if art_reserves:
-        reserve_lines = [f"    🕒 {r['client']}: {r['qty']} ед." for r in art_reserves]
-        reserve_info = "\n" + "\n".join(reserve_lines)
+def format_catalog_art(art):
+    """Форматирует информацию об артикуле из каталога с привязкой к складу"""
+    dop_list = catalog.get(art, [])
+    dop_str = ", ".join(dop_list) if dop_list else "нет"
+    # Проверяем наличие на складе
+    if art in inventory:
+        _, qty, price = inventory[art]
+        stock_info = f"📦 На складе: {qty} ед., цена: {price}"
     else:
-        reserve_info = ""
-    return (
-        f"🔍 Артикул: {art}\n"
-        f"  📎 Доп. артикул: {dop}\n"
-        f"  📦 Количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n"
-        f"  💰 Цена: {price}"
-        f"{reserve_info}"
-    )
+        stock_info = "❌ На складе отсутствует"
+    return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n{stock_info}"
 
 # ---------- Проверка доступа ----------
 def is_allowed(user_id):
@@ -190,10 +185,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = user_id in ADMIN_IDS
 
     welcome_text = (
-        "👋 Бот складского учёта.\n\n"
-        "🔍 Просто отправьте артикул (основной или дополнительный), и я покажу информацию о нём.\n"
-        "Можно искать по части номера (минимум 2 символа).\n"
-        "Регистр и разделители (дефисы, точки) не важны — я пойму.\n\n"
+        "👋 Бот складского учёта и каталога.\n\n"
+        "🔍 Просто отправьте артикул или его часть, и я покажу информацию из каталога и наличие на складе.\n"
+        f"Минимум {MIN_SEARCH_LENGTH} символа для частичного поиска.\n"
+        "Регистр и разделители не важны.\n\n"
     )
 
     if is_admin:
@@ -202,7 +197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
             "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n"
             "• отложить АРТИКУЛ, КОЛИЧЕСТВО, КЛИЕНТ — зарезервировать товар за клиентом\n"
-            "• снять АРТИКУЛ, КЛИЕНТ [КОЛИЧЕСТВО] — снять резерв (если количество не указано, снимается весь резерв клиента)\n\n"
+            "• снять АРТИКУЛ, КЛИЕНТ [КОЛИЧЕСТВО] — снять резерв\n\n"
             "Примеры:\n"
             "добавить AC-K171eh, 5\n"
             "отложить AC-K171eh, 2, Рейканен\n"
@@ -211,10 +206,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         welcome_text += "⛔ Команды изменения и резервирования доступны только администраторам.\n\n"
 
-    welcome_text += (
-        "📋 Команда /last — показать последние 5 изменений (доступна всем).\n"
-        "📋 Команда /reserves — показать текущие резервы (доступна всем)."
-    )
+    welcome_text += "📋 Команда /last — последние 5 изменений (доступна всем).\n"
+    welcome_text += "📋 Команда /reserves — показать все резервы (доступна всем)."
 
     await update.message.reply_text(welcome_text)
 
@@ -253,14 +246,14 @@ async def reserves_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not reserves:
-        await update.message.reply_text("📭 Резервов нет.")
+        await update.message.reply_text("📭 Нет активных резервов.")
         return
 
-    lines = ["📋 Текущие резервы:"]
+    lines = []
     for art, res_list in reserves.items():
-        for res in res_list:
-            lines.append(f"• {art} — {res['client']}: {res['qty']} ед.")
-    await update.message.reply_text("\n".join(lines))
+        for r in res_list:
+            lines.append(f"• {art} — {r['client']}: {r['qty']} ед.")
+    await update.message.reply_text("📋 Текущие резервы:\n" + "\n".join(lines))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -272,7 +265,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # ---------- Команда отложить ----------
+    # ---------- Команды администраторов ----------
     match_reserve = re.match(r'^отложить\s+([^,]+?)\s*,\s*(\d+)\s*,\s*(.+)$', text, re.IGNORECASE)
     if match_reserve:
         if user_id not in ADMIN_IDS:
@@ -291,17 +284,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        original_art = find_exact_original_art(art_input)
-        if original_art is None:
-            candidates = partial_search(art_input)
+        # Поиск артикула (сначала точный, потом частичный)
+        norm_art = normalize_art(art_input)
+        original_art = None
+        if norm_art in stock_norm_to_art:
+            original_art = stock_norm_to_art[norm_art]
+        else:
+            # Ищем в каталоге и берём первый попавшийся? Но для резерва нужен артикул из inventory
+            # Лучше показать варианты и попросить уточнить
+            candidates = [a for a in inventory if normalize_art(a) == norm_art]  # точное совпадение нормализованного
             if not candidates:
-                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
+                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.")
                 return
             if len(candidates) == 1:
                 original_art = candidates[0]
             else:
-                lines = [format_item_info(art) for art in candidates]
-                reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
+                # несколько кандидатов
+                lines = [format_catalog_art(art) for art in candidates]
+                reply = "🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines)
                 await update.message.reply_text(reply)
                 return
 
@@ -314,7 +314,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Добавляем резерв
         if original_art not in reserves:
             reserves[original_art] = []
         reserves[original_art].append({"client": client, "qty": qty_reserve})
@@ -329,7 +328,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---------- Команда снять резерв ----------
     match_remove = re.match(r'^снять\s+([^,]+?)\s*,\s*([^,]+?)(?:\s*,\s*(\d+))?$', text, re.IGNORECASE)
     if match_remove:
         if user_id not in ADMIN_IDS:
@@ -349,19 +347,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Количество должно быть целым числом.")
                 return
         else:
-            qty_to_remove = None  # значит снять весь резерв этого клиента
+            qty_to_remove = None
 
-        original_art = find_exact_original_art(art_input)
-        if original_art is None:
-            candidates = partial_search(art_input)
+        norm_art = normalize_art(art_input)
+        if norm_art in stock_norm_to_art:
+            original_art = stock_norm_to_art[norm_art]
+        else:
+            candidates = [a for a in inventory if normalize_art(a) == norm_art]
             if not candidates:
-                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
+                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.")
                 return
             if len(candidates) == 1:
                 original_art = candidates[0]
             else:
-                lines = [format_item_info(art) for art in candidates]
-                reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
+                lines = [format_catalog_art(art) for art in candidates]
+                reply = "🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines)
                 await update.message.reply_text(reply)
                 return
 
@@ -369,13 +369,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ По артикулу {original_art} нет резервов.")
             return
 
-        # Ищем записи этого клиента
         client_reserves = [r for r in reserves[original_art] if r['client'].lower() == client.lower()]
         if not client_reserves:
             await update.message.reply_text(f"❌ Для артикула {original_art} нет резерва для клиента '{client}'.")
             return
 
-        # Если количество не указано, удаляем все записи клиента
         if qty_to_remove is None:
             removed_total = sum(r['qty'] for r in client_reserves)
             reserves[original_art] = [r for r in reserves[original_art] if r['client'].lower() != client.lower()]
@@ -412,7 +410,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---------- Команды добавить/убавить ----------
     match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
     if match_cmd:
         if user_id not in ADMIN_IDS:
@@ -431,17 +428,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        original_art = find_exact_original_art(art_input)
-        if original_art is None:
-            candidates = partial_search(art_input)
+        norm_art = normalize_art(art_input)
+        if norm_art in stock_norm_to_art:
+            original_art = stock_norm_to_art[norm_art]
+        else:
+            candidates = [a for a in inventory if normalize_art(a) == norm_art]
             if not candidates:
-                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
+                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден на складе.")
                 return
             if len(candidates) == 1:
                 original_art = candidates[0]
             else:
-                lines = [format_item_info(art) for art in candidates]
-                reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
+                lines = [format_catalog_art(art) for art in candidates]
+                reply = "🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines)
                 await update.message.reply_text(reply)
                 return
 
@@ -476,31 +475,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---------- Обычный запрос артикула ----------
-    original_art = find_exact_original_art(text)
-    if original_art is not None:
-        dop, qty, price = inventory[original_art]
-        art_reserves = reserves.get(original_art, [])
-        total_reserved = sum(r['qty'] for r in art_reserves)
-        available = qty - total_reserved
-        if art_reserves:
-            reserve_lines = [f"    🕒 {r['client']}: {r['qty']} ед." for r in art_reserves]
-            reserve_info = "\n" + "\n".join(reserve_lines)
-        else:
-            reserve_info = ""
-        reply = (
-            f"🔍 Артикул: {original_art}\n"
-            f"📎 Доп. артикул: {dop}\n"
-            f"📦 Количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n"
-            f"💰 Цена: {price}"
-            f"{reserve_info}"
-        )
+    # ---------- Поиск по каталогу (не команда) ----------
+    arts = find_catalog_arts(text)
+    if not arts:
+        await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.")
+        return
+
+    if len(arts) == 1:
+        art = next(iter(arts))
+        reply = format_catalog_art(art)
     else:
-        candidates = partial_search(text)
-        if not candidates:
-            await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
-            return
-        lines = [format_item_info(art) for art in candidates]
+        # Сортируем и показываем все найденные
+        sorted_arts = sorted(arts)
+        lines = [format_catalog_art(art) for art in sorted_arts]
         reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
 
     await update.message.reply_text(reply)
@@ -510,59 +497,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admins", admins))
     app.add_handler(CommandHandler("last", last_changes))
-    app.add_handler(CommandHandler("reserves", reserves_command))  # новая команда
+    app.add_handler(CommandHandler("reserves", reserves_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 Бот складского учёта запущен...")
+    print("🚀 Бот складского учёта и каталога запущен...")
     print(f"🔒 Доступ разрешён для {len(ALLOWED_IDS)} пользователей.")
     print(f"🔑 Администраторов: {len(ADMIN_IDS)}")
     app.run_polling()
 
-# ---------- Запуск с повышенной надёжностью ----------
-async def run_bot():
-    # Создаём кастомный Request с увеличенными таймаутами
-    request = HTTPXRequest(
-        connection_pool_size=8,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30,
-        pool_timeout=30
-    )
-    
-    app = Application.builder().token(API_TOKEN).request(request).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admins", admins))
-    app.add_handler(CommandHandler("last", last_changes))
-    app.add_handler(CommandHandler("reserves", reserves_command))  # если ещё нет
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Запускаем с повторными попытками при сетевых ошибках
-    while True:
-        try:
-            logger.info("Бот запускается...")
-            await app.initialize()
-            await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
-            # Бесконечно ждём, пока бот работает
-            while True:
-                await asyncio.sleep(1)
-        except (NetworkError, TimedOut, ConnectionError) as e:
-            logger.error(f"Сетевая ошибка: {e}. Перезапуск через 10 секунд...")
-            await asyncio.sleep(10)
-            # Останавливаем и пробуем снова
-            try:
-                await app.updater.stop()
-                await app.stop()
-                await app.shutdown()
-            except:
-                pass
-        except Exception as e:
-            logger.exception(f"Неизвестная ошибка: {e}. Перезапуск через 30 секунд...")
-            await asyncio.sleep(30)
-
-def main():
-    asyncio.run(run_bot())
-
 if __name__ == '__main__':
     main()
-
