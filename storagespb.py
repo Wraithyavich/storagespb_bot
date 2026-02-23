@@ -2,6 +2,7 @@ import csv
 import os
 import re
 from collections import defaultdict
+from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -30,30 +31,33 @@ if ADMIN_IDS_STR:
     except ValueError:
         print("⚠️ Ошибка парсинга ADMIN_IDS, проверьте формат (числа через запятую)")
 
+# ---------- Имена пользователей (для отображения в логах) ----------
+USER_NAMES = {
+    1219230738: "Савелий",
+    526211024: "Ваня",
+    1995599290: "Настя"
+}
+
 # ---------- Имя файла с данными ----------
 DATA_FILE = 'inventory.csv'
-MIN_SEARCH_LENGTH = 2  # минимальная длина для частичного поиска
+LOG_FILE = 'last_changes.log'
+MIN_SEARCH_LENGTH = 2
 
 # ---------- Очистка текста ----------
 def clean_text(s):
-    """Удаляет лишние пробелы, управляющие символы и BOM."""
     s = s.strip()
     s = s.replace('\r', '').replace('\n', '').replace('\ufeff', '')
     return ' '.join(s.split())
 
 def normalize_art(s):
-    """
-    Приводит строку к нижнему регистру и удаляет всё, кроме букв и цифр.
-    Это позволяет находить артикулы независимо от наличия дефисов, точек, слешей и т.п.
-    """
     s = s.lower()
     s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
 # ---------- Загрузка данных из CSV ----------
-inventory = {}               # оригинальный артикул -> [доп_артикул, количество, цена (строка)]
-art_norm_to_original = {}    # нормализованный основной артикул -> оригинальный артикул
-dop_norm_to_original = {}    # нормализованный доп. артикул -> оригинальный основной артикул
+inventory = {}
+art_norm_to_original = {}
+dop_norm_to_original = {}
 
 try:
     with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -86,6 +90,24 @@ def save_inventory():
         for art, (dop, qty, price) in inventory.items():
             writer.writerow([art, dop, qty, price])
 
+# ---------- Логирование изменений ----------
+def log_change(user_id, action, art, delta, new_qty):
+    """Записывает действие в лог-файл."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    name = USER_NAMES.get(user_id, str(user_id))
+    log_line = f"[{timestamp}] {name} (ID:{user_id}) {action} {delta} к артикулу {art}, новый остаток: {new_qty}\n"
+    with open(LOG_FILE, mode='a', encoding='utf-8') as f:
+        f.write(log_line)
+
+# ---------- Чтение последних N записей из лога ----------
+def get_last_changes(n=5):
+    try:
+        with open(LOG_FILE, mode='r', encoding='utf-8') as f:
+            lines = f.readlines()
+        return lines[-n:] if lines else []
+    except FileNotFoundError:
+        return []
+
 # ---------- Функции поиска ----------
 def find_exact_original_art(query):
     norm_query = normalize_art(query)
@@ -98,8 +120,7 @@ def find_exact_original_art(query):
 def partial_search(query):
     norm_query = normalize_art(query)
     if len(norm_query) < MIN_SEARCH_LENGTH:
-        return []  # для слишком коротких запросов частичный поиск не делаем
-
+        return []
     results = set()
     for norm_art, orig_art in art_norm_to_original.items():
         if norm_query in norm_art:
@@ -143,10 +164,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📦 У вас есть права администратора. Доступны команды:\n"
             "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
             "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
-            "Пример: добавить AC-K171eh, 5"
+            "Пример: добавить AC-K171eh, 5\n\n"
         )
     else:
-        welcome_text += "⛔ Команды изменения количества доступны только администраторам."
+        welcome_text += "⛔ Команды изменения количества доступны только администраторам.\n\n"
+
+    welcome_text += "📋 Команда /last — показать последние 5 изменений (доступна всем)."
 
     await update.message.reply_text(welcome_text)
 
@@ -166,6 +189,18 @@ async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"• {uid}" for uid in sorted(ADMIN_IDS)]
     await update.message.reply_text("👤 Администраторы:\n" + "\n".join(lines))
 
+async def last_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("⛔ Доступ к боту запрещён.")
+        return
+
+    lines = get_last_changes(5)
+    if not lines:
+        await update.message.reply_text("Пока нет записей об изменениях.")
+    else:
+        await update.message.reply_text("📋 Последние изменения:\n" + "".join(lines))
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
@@ -176,10 +211,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Проверяем, является ли сообщение командой изменения
     match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
     if match_cmd:
-        # Проверка прав доступа на изменение
         if user_id not in ADMIN_IDS:
             await update.message.reply_text("⛔ У вас нет прав на изменение количества.")
             return
@@ -231,15 +264,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Ошибка при сохранении: {e}")
             return
 
+        # Логируем действие
+        log_change(user_id, action, original_art, delta, qty)
+
+        # Определяем имя для ответа
+        actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
         reply = (
             f"✅ {action.capitalize()} {delta} ед. для артикула {original_art}.\n"
             f"📦 Теперь количество: {qty}\n"
-            f"💰 Цена за единицу: {price}"
+            f"💰 Цена за единицу: {price}\n"
+            f"👤 Изменение внёс: {actor_name}"
         )
         await update.message.reply_text(reply)
         return
 
-    # Обычный запрос артикула (доступен всем разрешенным)
+    # Обычный запрос артикула
     original_art = find_exact_original_art(text)
     if original_art is not None:
         dop, qty, price = inventory[original_art]
@@ -263,6 +302,7 @@ def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admins", admins))
+    app.add_handler(CommandHandler("last", last_changes))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 Бот складского учёта запущен...")
