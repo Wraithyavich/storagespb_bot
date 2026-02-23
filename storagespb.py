@@ -10,6 +10,26 @@ API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
     raise ValueError("❌ Переменная окружения INVENTORY_BOT_TOKEN не задана!")
 
+# ---------- Список разрешенных пользователей (user_id) ----------
+ALLOWED_IDS_STR = os.environ.get('ALLOWED_IDS', '')
+ALLOWED_IDS = set()
+if ALLOWED_IDS_STR:
+    try:
+        ALLOWED_IDS = set(int(id.strip()) for id in ALLOWED_IDS_STR.split(',') if id.strip())
+        print(f"✅ Загружено {len(ALLOWED_IDS)} разрешенных пользователей")
+    except ValueError:
+        print("⚠️ Ошибка парсинга ALLOWED_IDS, проверьте формат (числа через запятую)")
+
+# ---------- Список администраторов (user_id) ----------
+ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '')
+ADMIN_IDS = set()
+if ADMIN_IDS_STR:
+    try:
+        ADMIN_IDS = set(int(id.strip()) for id in ADMIN_IDS_STR.split(',') if id.strip())
+        print(f"✅ Загружено {len(ADMIN_IDS)} администраторов")
+    except ValueError:
+        print("⚠️ Ошибка парсинга ADMIN_IDS, проверьте формат (числа через запятую)")
+
 # ---------- Имя файла с данными ----------
 DATA_FILE = 'inventory.csv'
 MIN_SEARCH_LENGTH = 2  # минимальная длина для частичного поиска
@@ -98,28 +118,72 @@ def format_item_info(art):
         f"  💰 Цена: {price}"
     )
 
+# ---------- Проверка доступа ----------
+def is_allowed(user_id):
+    return user_id in ALLOWED_IDS
+
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("⛔ Доступ к боту запрещён.")
+        return
+
+    is_admin = user_id in ADMIN_IDS
+
     welcome_text = (
         "👋 Бот складского учёта.\n\n"
         "🔍 Просто отправьте артикул (основной или дополнительный), и я покажу информацию о нём.\n"
         f"Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
         "Регистр и разделители (дефисы, точки) не важны — я пойму.\n\n"
-        "📦 Команды для изменения количества:\n"
-        "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
-        "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
-        "Пример: добавить AC-K171eh, 5\n\n"
-        "Для неполных артикулов при изменении нужно точное совпадение, иначе бот покажет список найденных."
     )
+
+    if is_admin:
+        welcome_text += (
+            "📦 У вас есть права администратора. Доступны команды:\n"
+            "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
+            "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n\n"
+            "Пример: добавить AC-K171eh, 5"
+        )
+    else:
+        welcome_text += "⛔ Команды изменения количества доступны только администраторам."
+
     await update.message.reply_text(welcome_text)
 
+async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("⛔ Доступ к боту запрещён.")
+        return
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ У вас нет прав на просмотр этой информации.")
+        return
+
+    if not ADMIN_IDS:
+        await update.message.reply_text("Список администраторов пуст.")
+        return
+
+    lines = [f"• {uid}" for uid in sorted(ADMIN_IDS)]
+    await update.message.reply_text("👤 Администраторы:\n" + "\n".join(lines))
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("⛔ Доступ к боту запрещён.")
+        return
+
     text = clean_text(update.message.text)
     if not text:
         return
 
+    # Проверяем, является ли сообщение командой изменения
     match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
     if match_cmd:
+        # Проверка прав доступа на изменение
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text("⛔ У вас нет прав на изменение количества.")
+            return
+
         command = match_cmd.group(1).lower()
         art_input = clean_text(match_cmd.group(2))
         try:
@@ -175,7 +239,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Обычный запрос артикула
+    # Обычный запрос артикула (доступен всем разрешенным)
     original_art = find_exact_original_art(text)
     if original_art is not None:
         dop, qty, price = inventory[original_art]
@@ -198,9 +262,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admins", admins))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 Бот складского учёта запущен...")
+    print(f"🔒 Доступ разрешён для {len(ALLOWED_IDS)} пользователей.")
+    print(f"🔑 Администраторов: {len(ADMIN_IDS)}")
     app.run_polling()
 
 if __name__ == '__main__':
