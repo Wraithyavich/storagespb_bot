@@ -12,7 +12,7 @@ if API_TOKEN is None:
 
 # ---------- Имя файла с данными ----------
 DATA_FILE = 'inventory.csv'
-MIN_SEARCH_LENGTH = 4  # минимальная длина для частичного поиска
+MIN_SEARCH_LENGTH = 2  # минимальная длина для частичного поиска
 
 # ---------- Очистка текста ----------
 def clean_text(s):
@@ -26,9 +26,7 @@ def normalize_art(s):
     Приводит строку к нижнему регистру и удаляет всё, кроме букв и цифр.
     Это позволяет находить артикулы независимо от наличия дефисов, точек, слешей и т.п.
     """
-    # сначала приводим к нижнему регистру
     s = s.lower()
-    # удаляем все символы, не являющиеся буквами или цифрами
     s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
@@ -48,8 +46,8 @@ try:
                     qty = int(clean_text(row[2]))
                 except ValueError:
                     qty = 0
-                price = clean_text(row[3])  # оставляем как есть, включая пробелы и т.д.
-                if art:  # артикул не должен быть пустым
+                price = clean_text(row[3])
+                if art:
                     inventory[art] = [dop, qty, price]
                     art_norm_to_original[normalize_art(art)] = art
                     if dop:
@@ -60,12 +58,9 @@ except Exception as e:
     print(f"❌ Ошибка загрузки: {e}")
 
 print(f"✅ Загружено {len(inventory)} записей.")
-# Для отладки можно вывести первые несколько нормализованных ключей:
-# print("Примеры нормализованных артикулов:", list(art_norm_to_original.keys())[:10])
 
 # ---------- Сохранение данных в CSV ----------
 def save_inventory():
-    """Перезаписывает файл с актуальными данными."""
     with open(DATA_FILE, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
         for art, (dop, qty, price) in inventory.items():
@@ -73,7 +68,6 @@ def save_inventory():
 
 # ---------- Функции поиска ----------
 def find_exact_original_art(query):
-    """Возвращает оригинальный основной артикул по точному совпадению (основному или доп.)."""
     norm_query = normalize_art(query)
     if norm_query in art_norm_to_original:
         return art_norm_to_original[norm_query]
@@ -82,23 +76,19 @@ def find_exact_original_art(query):
     return None
 
 def partial_search(query):
-    """Возвращает список оригинальных основных артикулов, у которых основной или доп. артикул содержит query как подстроку."""
     norm_query = normalize_art(query)
     if len(norm_query) < MIN_SEARCH_LENGTH:
-        return []  # для коротких запросов частичный поиск не делаем
+        return []  # для слишком коротких запросов частичный поиск не делаем
 
     results = set()
-    # Поиск по основным артикулам
     for norm_art, orig_art in art_norm_to_original.items():
         if norm_query in norm_art:
             results.add(orig_art)
-    # Поиск по дополнительным артикулам
     for norm_dop, orig_art in dop_norm_to_original.items():
         if norm_query in norm_dop:
             results.add(orig_art)
     return sorted(results)
 
-# ---------- Вспомогательная функция для форматирования информации об артикуле ----------
 def format_item_info(art):
     dop, qty, price = inventory[art]
     return (
@@ -128,7 +118,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Проверяем, является ли сообщение командой изменения
     match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
     if match_cmd:
         command = match_cmd.group(1).lower()
@@ -143,10 +132,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Количество должно быть положительным.")
             return
 
-        # Сначала пытаемся найти точное совпадение
         original_art = find_exact_original_art(art_input)
         if original_art is None:
-            # Если точного нет, пробуем частичный поиск
             candidates = partial_search(art_input)
             if not candidates:
                 await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
@@ -154,7 +141,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(candidates) == 1:
                 original_art = candidates[0]
             else:
-                # Несколько кандидатов – показываем список и просим уточнить
                 lines = [format_item_info(art) for art in candidates]
                 reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
                 await update.message.reply_text(reply)
@@ -165,7 +151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if command == 'добавить':
             qty += delta
             action = "добавлено"
-        else:  # убавить
+        else:
             if qty - delta < 0:
                 await update.message.reply_text(
                     f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.")
@@ -189,8 +175,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Если не команда, считаем запросом артикула
-    # Сначала точный поиск
+    # Обычный запрос артикула
     original_art = find_exact_original_art(text)
     if original_art is not None:
         dop, qty, price = inventory[original_art]
@@ -201,18 +186,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 Цена: {price}"
         )
     else:
-        # Частичный поиск
         candidates = partial_search(text)
         if not candidates:
             await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
             return
-        # Если есть результаты, показываем все
         lines = [format_item_info(art) for art in candidates]
         reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
 
     await update.message.reply_text(reply)
 
-# ---------- Запуск бота ----------
 def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
