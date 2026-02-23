@@ -229,8 +229,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     is_admin = user_id in ADMIN_IDS
 
+    # Возврат в главное меню – отправляем новое сообщение, чтобы сохранить историю
     if data == "back_to_main":
-        await query.edit_message_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
+        context.user_data.pop('awaiting', None)  # сбрасываем ожидание
+        await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
         return
 
     if data == "search":
