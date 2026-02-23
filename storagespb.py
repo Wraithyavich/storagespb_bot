@@ -46,12 +46,9 @@ RESERVES_FILE = 'reserves.json'
 
 # ---------- Загрузка резервов ----------
 def load_reserves():
-    """Загружает резервы из JSON-файла. Возвращает словарь: артикул -> список (клиент, количество)"""
     try:
         with open(RESERVES_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            # Преобразуем списки обратно в список кортежей? В JSON храним как список списков.
-            return data
+            return json.load(f)
     except FileNotFoundError:
         return {}
     except Exception as e:
@@ -59,12 +56,10 @@ def load_reserves():
         return {}
 
 def save_reserves(reserves):
-    """Сохраняет резервы в JSON-файл."""
     with open(RESERVES_FILE, 'w', encoding='utf-8') as f:
         json.dump(reserves, f, ensure_ascii=False, indent=2)
 
-# ---------- Глобальные переменные ----------
-reserves = load_reserves()  # структура: { "артикул": [{"client": "имя", "qty": число}, ...] }
+reserves = load_reserves()
 
 # ---------- Очистка текста ----------
 def clean_text(s):
@@ -153,8 +148,9 @@ def partial_search(query):
 
 def format_item_info(art):
     dop, qty, price = inventory[art]
-    # Добавляем информацию о резервах, если есть
     art_reserves = reserves.get(art, [])
+    total_reserved = sum(r['qty'] for r in art_reserves)
+    available = qty - total_reserved
     if art_reserves:
         reserve_lines = [f"    🕒 {r['client']}: {r['qty']} ед." for r in art_reserves]
         reserve_info = "\n" + "\n".join(reserve_lines)
@@ -163,7 +159,7 @@ def format_item_info(art):
     return (
         f"🔍 Артикул: {art}\n"
         f"  📎 Доп. артикул: {dop}\n"
-        f"  📦 Количество: {qty}\n"
+        f"  📦 Количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n"
         f"  💰 Цена: {price}"
         f"{reserve_info}"
     )
@@ -193,15 +189,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📦 У вас есть права администратора. Доступны команды:\n"
             "• добавить АРТИКУЛ, КОЛИЧЕСТВО — увеличить запас\n"
             "• убавить АРТИКУЛ, КОЛИЧЕСТВО — уменьшить запас\n"
-            "• отложить АРТИКУЛ, КОЛИЧЕСТВО, КЛИЕНТ — зарезервировать товар за клиентом\n\n"
+            "• отложить АРТИКУЛ, КОЛИЧЕСТВО, КЛИЕНТ — зарезервировать товар за клиентом\n"
+            "• снять АРТИКУЛ, КЛИЕНТ [КОЛИЧЕСТВО] — снять резерв (если количество не указано, снимается весь резерв клиента)\n\n"
             "Примеры:\n"
             "добавить AC-K171eh, 5\n"
-            "отложить AC-K171eh, 2, Рейканен\n\n"
+            "отложить AC-K171eh, 2, Рейканен\n"
+            "снять AC-K171eh, Рейканен, 1\n\n"
         )
     else:
         welcome_text += "⛔ Команды изменения и резервирования доступны только администраторам.\n\n"
 
-    welcome_text += "📋 Команда /last — показать последние 5 изменений (доступна всем)."
+    welcome_text += (
+        "📋 Команда /last — показать последние 5 изменений (доступна всем).\n"
+        "📋 Команда /reserves — показать текущие резервы (доступна всем)."
+    )
 
     await update.message.reply_text(welcome_text)
 
@@ -233,6 +234,22 @@ async def last_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("📋 Последние изменения:\n" + "".join(lines))
 
+async def reserves_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("⛔ Доступ к боту запрещён.")
+        return
+
+    if not reserves:
+        await update.message.reply_text("📭 Резервов нет.")
+        return
+
+    lines = ["📋 Текущие резервы:"]
+    for art, res_list in reserves.items():
+        for res in res_list:
+            lines.append(f"• {art} — {res['client']}: {res['qty']} ед.")
+    await update.message.reply_text("\n".join(lines))
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
@@ -243,7 +260,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Проверяем команду "отложить"
+    # ---------- Команда отложить ----------
     match_reserve = re.match(r'^отложить\s+([^,]+?)\s*,\s*(\d+)\s*,\s*(.+)$', text, re.IGNORECASE)
     if match_reserve:
         if user_id not in ADMIN_IDS:
@@ -276,9 +293,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(reply)
                 return
 
-        # Проверяем, достаточно ли товара на складе (опционально)
         dop, current_qty, price = inventory[original_art]
-        # Суммируем уже зарезервированное количество по этому артикулу
         total_reserved = sum(r['qty'] for r in reserves.get(original_art, []))
         available = current_qty - total_reserved
         if qty_reserve > available:
@@ -302,7 +317,90 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Проверяем команды добавить/убавить (как ранее)
+    # ---------- Команда снять резерв ----------
+    match_remove = re.match(r'^снять\s+([^,]+?)\s*,\s*([^,]+?)(?:\s*,\s*(\d+))?$', text, re.IGNORECASE)
+    if match_remove:
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text("⛔ У вас нет прав на снятие резерва.")
+            return
+
+        art_input = clean_text(match_remove.group(1))
+        client = clean_text(match_remove.group(2))
+        qty_to_remove = match_remove.group(3)
+        if qty_to_remove is not None:
+            try:
+                qty_to_remove = int(qty_to_remove)
+                if qty_to_remove <= 0:
+                    await update.message.reply_text("❌ Количество должно быть положительным.")
+                    return
+            except ValueError:
+                await update.message.reply_text("❌ Количество должно быть целым числом.")
+                return
+        else:
+            qty_to_remove = None  # значит снять весь резерв этого клиента
+
+        original_art = find_exact_original_art(art_input)
+        if original_art is None:
+            candidates = partial_search(art_input)
+            if not candidates:
+                await update.message.reply_text(f"❌ Артикул '{art_input}' не найден.")
+                return
+            if len(candidates) == 1:
+                original_art = candidates[0]
+            else:
+                lines = [format_item_info(art) for art in candidates]
+                reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
+                await update.message.reply_text(reply)
+                return
+
+        if original_art not in reserves or not reserves[original_art]:
+            await update.message.reply_text(f"❌ По артикулу {original_art} нет резервов.")
+            return
+
+        # Ищем записи этого клиента
+        client_reserves = [r for r in reserves[original_art] if r['client'].lower() == client.lower()]
+        if not client_reserves:
+            await update.message.reply_text(f"❌ Для артикула {original_art} нет резерва для клиента '{client}'.")
+            return
+
+        # Если количество не указано, удаляем все записи клиента
+        if qty_to_remove is None:
+            removed_total = sum(r['qty'] for r in client_reserves)
+            reserves[original_art] = [r for r in reserves[original_art] if r['client'].lower() != client.lower()]
+            action_msg = f"✅ Снят весь резерв ({removed_total} ед.) для клиента '{client}' по артикулу {original_art}."
+        else:
+            found = False
+            for i, r in enumerate(reserves[original_art]):
+                if r['client'].lower() == client.lower() and r['qty'] >= qty_to_remove:
+                    r['qty'] -= qty_to_remove
+                    if r['qty'] == 0:
+                        del reserves[original_art][i]
+                    found = True
+                    break
+            if not found:
+                await update.message.reply_text(f"❌ Нет резерва для '{client}' с количеством >= {qty_to_remove}.")
+                return
+            action_msg = f"✅ Снято {qty_to_remove} ед. из резерва для клиента '{client}' по артикулу {original_art}."
+            reserves[original_art] = [r for r in reserves[original_art] if r['qty'] > 0]
+
+        if not reserves[original_art]:
+            del reserves[original_art]
+
+        save_reserves(reserves)
+
+        dop, current_qty, price = inventory[original_art]
+        total_reserved = sum(r['qty'] for r in reserves.get(original_art, []))
+        available = current_qty - total_reserved
+        actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
+        reply = (
+            f"{action_msg}\n"
+            f"📦 Теперь по артикулу {original_art}: всего {current_qty}, доступно {available}, зарезервировано {total_reserved}\n"
+            f"👤 Действие выполнил: {actor_name}"
+        )
+        await update.message.reply_text(reply)
+        return
+
+    # ---------- Команды добавить/убавить ----------
     match_cmd = re.match(r'^(добавить|убавить)\s+([^,]+?)\s*,\s*(\d+)$', text, re.IGNORECASE)
     if match_cmd:
         if user_id not in ADMIN_IDS:
@@ -341,7 +439,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             qty += delta
             action = "добавлено"
         else:
-            # При убавлении проверяем, не уйдём ли в минус с учётом резервов? Пока просто проверяем общее количество.
             if qty - delta < 0:
                 await update.message.reply_text(
                     f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.")
@@ -353,7 +450,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_inventory()
         log_change(user_id, action, original_art, delta, qty)
 
-        # Показываем также информацию о резервах после изменения
         art_reserves = reserves.get(original_art, [])
         total_reserved = sum(r['qty'] for r in art_reserves)
         available = qty - total_reserved
@@ -368,11 +464,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Обычный запрос артикула
+    # ---------- Обычный запрос артикула ----------
     original_art = find_exact_original_art(text)
     if original_art is not None:
         dop, qty, price = inventory[original_art]
-        # Добавляем информацию о резервах
         art_reserves = reserves.get(original_art, [])
         total_reserved = sum(r['qty'] for r in art_reserves)
         available = qty - total_reserved
@@ -393,7 +488,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not candidates:
             await update.message.reply_text(f"❌ Артикул '{text}' не найден.")
             return
-        # Для каждого кандидата показываем информацию
         lines = [format_item_info(art) for art in candidates]
         reply = "🔍 Найдено несколько артикулов:\n\n" + "\n\n".join(lines)
 
@@ -404,6 +498,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admins", admins))
     app.add_handler(CommandHandler("last", last_changes))
+    app.add_handler(CommandHandler("reserves", reserves_command))  # новая команда
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 Бот складского учёта запущен...")
