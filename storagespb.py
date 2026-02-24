@@ -301,6 +301,7 @@ def get_back_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_admin_actions_keyboard(art):
+    # Эта функция больше не используется для основного поиска, но оставлена для других диалогов
     keyboard = [
         [InlineKeyboardButton("➕ Добавить", callback_data=f"add_{art}"),
          InlineKeyboardButton("➖ Убавить", callback_data=f"remove_{art}")],
@@ -398,7 +399,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "reserve_add_another":
-        # Отправляем новое сообщение с обычной клавиатурой
         await query.message.reply_text("🕒 Введите следующий артикул для резервирования:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_art'
         return
@@ -477,7 +477,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
             context.user_data.pop('unreserve_step', None)
         else:
-            # Отправляем новое сообщение с обычной клавиатурой
             await query.message.reply_text(
                 f"📦 У клиента {client} зарезервировано {qty} ед. артикула {art}.\nВведите количество для снятия (или 'все'):",
                 reply_markup=get_back_keyboard()
@@ -573,7 +572,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         art = sorted_arts[0]
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
-            await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
+            # Вместо inline-кнопок используем основную reply-клавиатуру
+            await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
