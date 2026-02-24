@@ -229,18 +229,26 @@ def clean_old_logs():
     with open(LOG_FILE, mode='w', encoding='utf-8') as f:
         f.writelines(new_lines)
 
-# ---------- Функции поиска в каталоге ----------
-def find_catalog_arts(query):
+# ---------- Функции поиска в каталоге и на складе ----------
+def find_arts(query):
+    """Возвращает множество оригинальных артикулов, найденных в каталоге или на складе (по частичному совпадению)."""
     norm_query = normalize_art(query)
     if len(norm_query) < MIN_SEARCH_LENGTH:
         return set()
     results = set()
+    # Поиск в каталоге
     for norm_art, orig_arts in catalog_norm_to_original.items():
         if norm_query in norm_art:
             results.update(orig_arts)
+    # Поиск на складе (по артикулам склада)
+    for norm_art, orig_art in stock_norm_to_art.items():
+        if norm_query in norm_art:
+            results.add(orig_art)
     return results
 
-def format_catalog_art(art):
+def format_art_info(art):
+    """Формирует информацию об артикуле, объединяя данные из каталога и склада."""
+    # Данные из каталога (доп. артикулы)
     dop_list = catalog.get(art, [])
     dop_short = []
     for d in dop_list:
@@ -251,12 +259,17 @@ def format_catalog_art(art):
         dop_short.append(base)
     unique_dop = sorted(set(dop_short))
     dop_str = ", ".join(unique_dop) if unique_dop else "нет"
+    
+    # Данные со склада
     if art in inventory:
         _, qty, price, discount = inventory[art]
         stock_info = f"📦 На складе: {qty} ед., цена: {price}"
         discount_info = "\n🏷️ **Есть скидка!**" if discount else ""
+        # Если артикул есть и в каталоге, и на складе – показываем всё
+        # Если только на складе – доп. артикулы могут быть пустыми или из каталога, если есть
         return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n{stock_info}{discount_info}"
     else:
+        # Артикул только в каталоге (на складе отсутствует)
         return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n❌ На складе отсутствует"
 
 # ---------- Вспомогательные функции для резервов ----------
@@ -365,7 +378,6 @@ async def process_shipments(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"❌ Недостаточно товара {art} для отгрузки {sh['client']} {sh['qty']} ед. (в наличии {qty})",
                             reply_markup=get_main_reply_keyboard(True)
                         )
-                        # Не проводим, оставляем как есть
                         new_list.append(sh)
                         continue
                     else:
@@ -377,7 +389,6 @@ async def process_shipments(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         new_list.append(sh)
                         log_change(user_id, f"отгружено (клиент {sh['client']})", art, sh['qty'], qty)
                 else:
-                    # Артикул отсутствует на складе – просто помечаем как проведённый? Лучше не проводить.
                     await update.message.reply_text(f"❌ Артикул {art} не найден на складе, отгрузка не проведена")
                     new_list.append(sh)
             else:
@@ -407,7 +418,6 @@ async def process_receipts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     new_list.append(rc)
                     log_change(user_id, f"прибыло (поставщик {rc['supplier']})", art, rc['qty'], qty)
                 else:
-                    # Если артикула нет на складе – создаём? По заданию просто пропускаем.
                     await update.message.reply_text(f"❌ Артикул {art} не найден на складе, прибытие не проведено")
                     new_list.append(rc)
             else:
@@ -788,21 +798,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_dialog_input(update, context, text, awaiting)
         return
 
-    arts = find_catalog_arts(text)
+    # Поиск по каталогу и складу
+    arts = find_arts(text)
     if not arts:
-        await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
+        await update.message.reply_text(f"❌ Артикул '{text}' не найден ни в каталоге, ни на складе.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
         return
     sorted_arts = sorted(arts)
     total = len(sorted_arts)
     if total == 1:
         art = sorted_arts[0]
-        reply = format_catalog_art(art)
+        reply = format_art_info(art)
         if user_id in ADMIN_IDS:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
-        lines = [format_catalog_art(art) for art in sorted_arts[:10]]
+        lines = [format_art_info(art) for art in sorted_arts[:10]]
         full_message = "\n\n".join(lines)
         if total > 10:
             full_message += f"\n\n... и ещё {total-10} артикулов. Уточните запрос."
@@ -829,7 +840,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if len(candidates) == 1:
                 art = candidates[0]
             else:
-                lines = [format_catalog_art(a) for a in candidates]
+                lines = [format_art_info(a) for a in candidates]
                 await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
                 context.user_data.pop('awaiting', None)
                 return
@@ -881,7 +892,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if len(candidates) == 1:
                 art = candidates[0]
             else:
-                lines = [format_catalog_art(a) for a in candidates]
+                lines = [format_art_info(a) for a in candidates]
                 await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
                 context.user_data.pop('awaiting', None)
                 return
@@ -936,7 +947,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if len(candidates) == 1:
                 art = candidates[0]
             else:
-                lines = [format_catalog_art(a) for a in candidates]
+                lines = [format_art_info(a) for a in candidates]
                 await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
                 context.user_data.pop('awaiting', None)
                 return
@@ -1043,7 +1054,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if len(candidates) == 1:
                 art = candidates[0]
             else:
-                lines = [format_catalog_art(a) for a in candidates]
+                lines = [format_art_info(a) for a in candidates]
                 await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
                 context.user_data.pop('awaiting', None)
                 return
@@ -1075,7 +1086,6 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=get_back_keyboard()
             )
             return
-        # Не изменяем склад сейчас, только фиксируем отгрузку
         context.user_data['shipment_current_qty'] = qty
         context.user_data['shipment_current_price'] = price
         await update.message.reply_text(f"📤 Введите цену за единицу для {art} (можно изменить):", reply_markup=get_back_keyboard())
@@ -1139,7 +1149,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if len(candidates) == 1:
                 art = candidates[0]
             else:
-                lines = [format_catalog_art(a) for a in candidates]
+                lines = [format_art_info(a) for a in candidates]
                 await update.message.reply_text("🔍 Найдено несколько артикулов на складе:\n\n" + "\n\n".join(lines), reply_markup=get_back_keyboard())
                 context.user_data.pop('awaiting', None)
                 return
@@ -1162,7 +1172,6 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
-        # Не изменяем склад сейчас, только фиксируем прибытие
         context.user_data['receipt_current_qty'] = qty
         items = context.user_data.get('receipt_items', [])
         items.append((art, qty))
