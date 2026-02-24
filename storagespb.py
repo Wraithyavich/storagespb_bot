@@ -4,7 +4,7 @@ import re
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # ---------- Получение токена из переменной окружения ----------
@@ -284,24 +284,23 @@ def remove_partial_reserve(client, art, qty_to_remove):
     return False
 
 # ---------- Клавиатуры ----------
-def get_main_keyboard(is_admin):
-    keyboard = [
-        [InlineKeyboardButton("📋 Резервы", callback_data="reserves"),
-         InlineKeyboardButton("📜 Последние изменения", callback_data="last")]
+def get_main_reply_keyboard(is_admin):
+    """Основная reply-клавиатура под полем ввода."""
+    buttons = [
+        [KeyboardButton("📋 Резервы"), KeyboardButton("📜 Последние изменения")]
     ]
     if is_admin:
-        keyboard.append([InlineKeyboardButton("➕ Добавить", callback_data="add"),
-                         InlineKeyboardButton("➖ Убавить", callback_data="remove")])
-        keyboard.append([InlineKeyboardButton("🕒 Отложить", callback_data="reserve"),
-                         InlineKeyboardButton("❌ Снять резерв", callback_data="unreserve")])
-
-    return InlineKeyboardMarkup(keyboard)
+        buttons.append([KeyboardButton("➕ Добавить"), KeyboardButton("➖ Убавить")])
+        buttons.append([KeyboardButton("🕒 Отложить"), KeyboardButton("❌ Снять резерв")])
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def get_back_keyboard():
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
-    return InlineKeyboardMarkup(keyboard)
+    """Клавиатура с одной кнопкой 'Назад' (reply)."""
+    keyboard = [[KeyboardButton("🔙 Назад")]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_admin_actions_keyboard(art):
+    """Inline-кнопки для действий с конкретным артикулом (после поиска)."""
     keyboard = [
         [InlineKeyboardButton("➕ Добавить", callback_data=f"add_{art}"),
          InlineKeyboardButton("➖ Убавить", callback_data=f"remove_{art}")],
@@ -326,7 +325,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Регистр и разделители не важны.\n\n"
         "Используйте кнопки ниже для управления складом."
     )
-    await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(is_admin))
+    await update.message.reply_text(welcome_text, reply_markup=get_main_reply_keyboard(is_admin))
+
+async def show_reserves(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает текущие резервы."""
+    if not reserves:
+        await update.message.reply_text("📭 Нет активных резервов.", reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+    else:
+        lines = []
+        for art, res_list in reserves.items():
+            for r in res_list:
+                price_str = r.get('price', 'не указана')
+                lines.append(f"• {r['client']} — {art} — {r['qty']} ед. — цена: {price_str}")
+        await update.message.reply_text("📋 Текущие резервы:\n" + "\n".join(lines), reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+
+async def show_last_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает последние изменения."""
+    clean_old_logs()
+    lines = get_last_changes(40)
+    if not lines:
+        await update.message.reply_text("Нет записей об изменениях за последние 7 дней.", reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+    else:
+        await update.message.reply_text("📋 Последние 40 изменений (за 7 дней):\n" + "".join(lines), reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+
+async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог добавления."""
+    await update.message.reply_text("➕ Введите артикул для добавления:", reply_markup=get_back_keyboard())
+    context.user_data['awaiting'] = 'add_art'
+
+async def start_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог убавления."""
+    await update.message.reply_text("➖ Введите артикул для убавления:", reply_markup=get_back_keyboard())
+    context.user_data['awaiting'] = 'remove_art'
+
+async def start_reserve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог резервирования."""
+    await update.message.reply_text("🕒 Введите артикул для резервирования:", reply_markup=get_back_keyboard())
+    context.user_data['awaiting'] = 'reserve_art'
+    context.user_data['reserve_items'] = []
+    context.user_data['reserve_client'] = None
+
+async def start_unreserve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог снятия резерва."""
+    clients = get_all_clients()
+    if not clients:
+        await update.message.reply_text("❌ Нет активных резервов.", reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+        return
+    # Для выбора клиента используем inline-кнопки (более удобно, чем reply)
+    keyboard = []
+    for idx, client in enumerate(clients):
+        keyboard.append([InlineKeyboardButton(client, callback_data=f"unreserve_client_{idx}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")])
+    await update.message.reply_text("👤 Выберите клиента:", reply_markup=InlineKeyboardMarkup(keyboard))
+    context.user_data['unreserve_clients'] = clients
+    context.user_data['unreserve_step'] = 'select_client'
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -342,10 +394,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Возврат в главное меню
     if data == "back_to_main":
         context.user_data.clear()
-        await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
+        await query.message.reply_text(
+            "👋 Выберите действие:",
+            reply_markup=get_main_reply_keyboard(is_admin)
+        )
         return
-
-
 
     # Другое количество (при резервировании)
     if data == "reserve_retry_qty":
@@ -372,83 +425,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_reserve_event(user_id, "зарезервировано", art, client, qty, price)
             save_reserves(reserves)
             lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
-            await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
+            await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines))
+            await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
             context.user_data.pop('awaiting', None)
             context.user_data.pop('reserve_items', None)
             context.user_data.pop('reserve_client', None)
         return
 
-    # Просмотр резервов
-    if data == "reserves":
-        if not reserves:
-            await query.edit_message_text("📭 Нет активных резервов.", reply_markup=get_back_keyboard())
-        else:
-            lines = []
-            for art, res_list in reserves.items():
-                for r in res_list:
-                    price_str = r.get('price', 'не указана')
-                    lines.append(f"• {r['client']} — {art} — {r['qty']} ед. — цена: {price_str}")
-            await query.edit_message_text("📋 Текущие резервы:\n" + "\n".join(lines), reply_markup=get_back_keyboard())
-        return
-
-    # Последние изменения
-    if data == "last":
-        clean_old_logs()
-        lines = get_last_changes(40)
-        if not lines:
-            await query.edit_message_text("Нет записей об изменениях за последние 7 дней.", reply_markup=get_back_keyboard())
-        else:
-            await query.edit_message_text("📋 Последние 40 изменений (за 7 дней):\n" + "".join(lines), reply_markup=get_back_keyboard())
-        return
-
-    # Проверка прав администратора для остальных команд
-    if not is_admin:
-        await query.edit_message_text("⛔ У вас нет прав на выполнение этой команды.", reply_markup=get_back_keyboard())
-        return
-
-    # Админские команды
-    if data == "add":
-        await query.edit_message_text("➕ Введите артикул для добавления:", reply_markup=get_back_keyboard())
-        context.user_data['awaiting'] = 'add_art'
-        return
-    if data == "remove":
-        await query.edit_message_text("➖ Введите артикул для убавления:", reply_markup=get_back_keyboard())
-        context.user_data['awaiting'] = 'remove_art'
-        return
-    if data == "reserve":
-        await query.edit_message_text("🕒 Введите артикул для резервирования:", reply_markup=get_back_keyboard())
-        context.user_data['awaiting'] = 'reserve_art'
-        context.user_data['reserve_items'] = []
-        context.user_data['reserve_client'] = None
-        return
-    if data == "unreserve":
-        # Шаг 1: выбор клиента
-        clients = get_all_clients()
-        if not clients:
-            await query.edit_message_text("❌ Нет активных резервов.", reply_markup=get_back_keyboard())
-            return
-        # Сохраняем список клиентов в user_data для использования в callback'ах
-        context.user_data['unreserve_clients'] = clients
-        keyboard = []
-        for idx, client in enumerate(clients):
-            keyboard.append([InlineKeyboardButton(client, callback_data=f"unreserve_client_{idx}")])
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="back_to_main")])
-        await query.edit_message_text("👤 Выберите клиента:", reply_markup=InlineKeyboardMarkup(keyboard))
-        context.user_data['unreserve_step'] = 'select_client'
-        return
-
-    # Обработка выбора клиента для снятия резерва
+    # Выбор клиента для снятия резерва
     if data.startswith("unreserve_client_"):
         idx = int(data.split('_')[-1])
         clients = context.user_data.get('unreserve_clients', [])
         if idx < 0 or idx >= len(clients):
-            await query.edit_message_text("❌ Ошибка выбора клиента.", reply_markup=get_back_keyboard())
+            await query.edit_message_text("❌ Ошибка выбора клиента.")
             return
         client = clients[idx]
         context.user_data['unreserve_client'] = client
         articles = get_client_articles(client)
         if not articles:
-            await query.edit_message_text(f"❌ У клиента {client} нет резервов.", reply_markup=get_back_keyboard())
+            await query.edit_message_text(f"❌ У клиента {client} нет резервов.")
             return
         context.user_data['unreserve_articles'] = articles
         keyboard = []
@@ -471,24 +466,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['unreserve_step'] = 'select_client'
         return
 
-    # Выбор конкретного артикула
+    # Выбор конкретного артикула для снятия
     if data.startswith("unreserve_art_"):
         idx = int(data.split('_')[-1])
         articles = context.user_data.get('unreserve_articles', [])
         if idx < 0 or idx >= len(articles):
-            await query.edit_message_text("❌ Ошибка выбора артикула.", reply_markup=get_back_keyboard())
+            await query.edit_message_text("❌ Ошибка выбора артикула.")
             return
         art = articles[idx]
         client = context.user_data.get('unreserve_client')
         qty = get_client_article_qty(client, art)
         if qty == 1:
-            # Снимаем сразу
             remove_partial_reserve(client, art, 1)
             log_reserve_event(user_id, "снят резерв", art, client, 1)
-            await query.edit_message_text(f"✅ Резерв для клиента {client} по артикулу {art} (1 ед.) снят.", reply_markup=get_back_keyboard())
+            await query.edit_message_text(f"✅ Резерв для клиента {client} по артикулу {art} (1 ед.) снят.")
+            await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
             context.user_data.pop('unreserve_step', None)
         else:
-            # Запрашиваем количество
             await query.edit_message_text(f"📦 У клиента {client} зарезервировано {qty} ед. артикула {art}.\nВведите количество для снятия (или 'все'):", reply_markup=get_back_keyboard())
             context.user_data['unreserve_art'] = art
             context.user_data['unreserve_max_qty'] = qty
@@ -499,11 +493,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "unreserve_all":
         client = context.user_data.get('unreserve_client')
         if not client:
-            await query.edit_message_text("❌ Ошибка: не выбран клиент.", reply_markup=get_back_keyboard())
+            await query.edit_message_text("❌ Ошибка: не выбран клиент.")
             return
         remove_client_reserves(client)
         log_reserve_event(user_id, "сняты все резервы", "", client, 0)
-        await query.edit_message_text(f"✅ Все резервы клиента {client} сняты.", reply_markup=get_back_keyboard())
+        await query.edit_message_text(f"✅ Все резервы клиента {client} сняты.")
+        await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
         context.user_data.pop('unreserve_step', None)
         return
 
@@ -525,12 +520,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("unreserve_"):
         art = data[10:]
-        # Прямой переход к снятию с конкретного артикула (из админской кнопки)
+        # Старая логика – можно оставить для совместимости
         await query.edit_message_text(f"❌ Введите клиента для снятия резерва с {art} (или клиент, количество):", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"unreserve_data_{art}"
         return
 
-    await query.edit_message_text("Неизвестная команда.", reply_markup=get_back_keyboard())
+    await query.edit_message_text("Неизвестная команда.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -542,15 +537,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
+    # Обработка нажатий на reply-кнопки (они приходят как текст)
+    if text == "📋 Резервы":
+        await show_reserves(update, context)
+        return
+    if text == "📜 Последние изменения":
+        await show_last_changes(update, context)
+        return
+    if text == "🔙 Назад":
+        # Возврат в главное меню
+        is_admin = user_id in ADMIN_IDS
+        await update.message.reply_text("👋 Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
+        context.user_data.clear()
+        return
+
+    # Админские действия
+    if user_id in ADMIN_IDS:
+        if text == "➕ Добавить":
+            await start_add(update, context)
+            return
+        if text == "➖ Убавить":
+            await start_remove(update, context)
+            return
+        if text == "🕒 Отложить":
+            await start_reserve(update, context)
+            return
+        if text == "❌ Снять резерв":
+            await start_unreserve(update, context)
+            return
+
+    # Если есть ожидание ввода от диалога
     awaiting = context.user_data.get('awaiting')
     if awaiting:
+        # Перенаправляем в старый обработчик диалогов (с незначительными изменениями)
         await handle_dialog_input(update, context, text, awaiting)
         return
 
     # Поиск по каталогу
     arts = find_catalog_arts(text)
     if not arts:
-        await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_back_keyboard())
+        await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
         return
     sorted_arts = sorted(arts)
     total = len(sorted_arts)
@@ -558,20 +584,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         art = sorted_arts[0]
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
+            # Отправляем результат с inline-кнопками для действий
             await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
         else:
-            await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+            await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
         lines = [format_catalog_art(art) for art in sorted_arts[:10]]
         full_message = "\n\n".join(lines)
         if total > 10:
             full_message += f"\n\n... и ещё {total-10} артикулов. Уточните запрос."
-        await update.message.reply_text(full_message, reply_markup=get_back_keyboard())
+        await update.message.reply_text(full_message, reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
 
 async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, awaiting: str):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет прав.", reply_markup=get_back_keyboard())
+        await update.message.reply_text("⛔ У вас нет прав.", reply_markup=get_main_reply_keyboard(False))
         context.user_data.pop('awaiting', None)
         return
 
@@ -609,7 +636,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         art = context.user_data.get('add_art')
         if not art or art not in inventory:
-            await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_back_keyboard())
+            await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
         dop, qty, price = inventory[art]
@@ -622,7 +649,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
         reply = f"✅ Добавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
-        await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+        await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
@@ -660,7 +687,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         art = context.user_data.get('remove_art')
         if not art or art not in inventory:
-            await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_back_keyboard())
+            await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
         dop, qty, price = inventory[art]
@@ -676,7 +703,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
         reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
-        await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+        await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
@@ -714,7 +741,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         art = context.user_data.get('reserve_current_art')
         if not art or art not in inventory:
-            await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_back_keyboard())
+            await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
         dop, current_qty, price = inventory[art]
@@ -750,7 +777,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         art = context.user_data.get('reserve_current_art')
         qty = context.user_data.get('reserve_current_qty')
         if not art or not qty:
-            await update.message.reply_text("❌ Ошибка данных. Начните заново.", reply_markup=get_back_keyboard())
+            await update.message.reply_text("❌ Ошибка данных. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
         items = context.user_data.get('reserve_items', [])
@@ -768,7 +795,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         client = text
         items = context.user_data.get('reserve_items', [])
         if not items:
-            await update.message.reply_text("❌ Нет позиций для сохранения. Начните заново.", reply_markup=get_back_keyboard())
+            await update.message.reply_text("❌ Нет позиций для сохранения. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
         for art, qty, price in items:
@@ -778,7 +805,8 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             log_reserve_event(user_id, "зарезервировано", art, client, qty, price)
         save_reserves(reserves)
         lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
-        await update.message.reply_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines), reply_markup=get_back_keyboard())
+        await update.message.reply_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines))
+        await update.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         context.user_data.pop('reserve_items', None)
         context.user_data.pop('reserve_client', None)
@@ -790,7 +818,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         client = context.user_data.get('unreserve_client')
         max_qty = context.user_data.get('unreserve_max_qty')
         if not art or not client or not max_qty:
-            await update.message.reply_text("❌ Ошибка данных. Начните заново.", reply_markup=get_back_keyboard())
+            await update.message.reply_text("❌ Ошибка данных. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
         if text.lower() == 'все':
@@ -809,7 +837,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
         if remove_partial_reserve(client, art, qty_to_remove):
             log_reserve_event(user_id, "снято", art, client, qty_to_remove)
-            await update.message.reply_text(f"✅ Снято {qty_to_remove} ед. резерва клиента {client} по артикулу {art}.", reply_markup=get_back_keyboard())
+            await update.message.reply_text(f"✅ Снято {qty_to_remove} ед. резерва клиента {client} по артикулу {art}.", reply_markup=get_main_reply_keyboard(True))
         else:
             await update.message.reply_text("❌ Ошибка при снятии резерва.", reply_markup=get_back_keyboard())
         context.user_data.pop('awaiting', None)
@@ -867,7 +895,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         available = current_qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
         reply = f"{action_msg}\n📦 Теперь по артикулу {art}: всего {current_qty}, доступно {available}, зарезервировано {total_reserved}\n👤 Действие выполнил: {actor_name}"
-        await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+        await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
@@ -895,7 +923,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
         reply = f"✅ Добавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
-        await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+        await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
@@ -925,7 +953,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
         reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
-        await update.message.reply_text(reply, reply_markup=get_back_keyboard())
+        await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
@@ -959,7 +987,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data['awaiting'] = 'reserve_price'
         return
 
-    await update.message.reply_text("Неизвестная команда.", reply_markup=get_back_keyboard())
+    await update.message.reply_text("Неизвестная команда.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
 
 async def post_init(application: Application) -> None:
     """Устанавливает кнопку меню с командами при запуске бота."""
@@ -972,11 +1000,10 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 Бот складского учёта и каталога с кнопками запущен...")
+    print("🚀 Бот складского учёта и каталога с reply-клавиатурой запущен...")
     print(f"🔒 Доступ разрешён для {len(ALLOWED_IDS)} пользователей.")
     print(f"🔑 Администраторов: {len(ADMIN_IDS)}")
     app.run_polling()
 
 if __name__ == '__main__':
     main()
-
