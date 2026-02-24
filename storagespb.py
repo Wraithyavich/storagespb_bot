@@ -62,7 +62,7 @@ def normalize_art(s):
     return s
 
 # ---------- Загрузка складских данных ----------
-inventory = {}
+inventory = {}               # art -> [dop, qty, price, discount_flag]
 stock_norm_to_art = {}
 
 try:
@@ -77,8 +77,11 @@ try:
                 except ValueError:
                     qty = 0
                 price = clean_text(row[3])
+                discount = False
+                if len(row) >= 5 and clean_text(row[4]) == "1":
+                    discount = True
                 if art:
-                    inventory[art] = [dop, qty, price]
+                    inventory[art] = [dop, qty, price, discount]
                     stock_norm_to_art[normalize_art(art)] = art
 except FileNotFoundError:
     print(f"⚠️ Файл {DATA_FILE} не найден, будет создан при первом изменении.")
@@ -131,8 +134,9 @@ reserves = load_reserves()
 def save_inventory():
     with open(DATA_FILE, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
-        for art, (dop, qty, price) in inventory.items():
-            writer.writerow([art, dop, qty, price])
+        for art, (dop, qty, price, discount) in inventory.items():
+            discount_str = "1" if discount else ""
+            writer.writerow([art, dop, qty, price, discount_str])
 
 # ---------- Логирование изменений ----------
 def log_change(user_id, action, art, delta, new_qty):
@@ -213,11 +217,12 @@ def format_catalog_art(art):
     unique_dop = sorted(set(dop_short))
     dop_str = ", ".join(unique_dop) if unique_dop else "нет"
     if art in inventory:
-        _, qty, price = inventory[art]
+        _, qty, price, discount = inventory[art]   # dop не используем
         stock_info = f"📦 На складе: {qty} ед., цена: {price}"
+        discount_info = "\n🏷️ **Есть скидка!**" if discount else ""
+        return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n{stock_info}{discount_info}"
     else:
-        stock_info = "❌ На складе отсутствует"
-    return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n{stock_info}"
+        return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n❌ На складе отсутствует"
 
 # ---------- Вспомогательные функции для резервов ----------
 def get_all_clients():
@@ -271,7 +276,6 @@ def remove_partial_reserve(client, art, qty_to_remove):
                 removed = True
                 # не добавляем обратно, т.е. удаляем
             else:
-                # не хватает – не должно случиться из-за проверки
                 return False
         else:
             new_list.append(r)
@@ -285,7 +289,6 @@ def remove_partial_reserve(client, art, qty_to_remove):
 
 # ---------- Клавиатуры ----------
 def get_main_reply_keyboard(is_admin):
-    """Основная reply-клавиатура под полем ввода."""
     buttons = [
         [KeyboardButton("📋 Резервы"), KeyboardButton("📜 Последние изменения")]
     ]
@@ -295,12 +298,10 @@ def get_main_reply_keyboard(is_admin):
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def get_back_keyboard():
-    """Клавиатура с одной кнопкой 'Назад' (reply)."""
     keyboard = [[KeyboardButton("🔙 Назад")]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_admin_actions_keyboard(art):
-    """Inline-кнопки для действий с конкретным артикулом (после поиска)."""
     keyboard = [
         [InlineKeyboardButton("➕ Добавить", callback_data=f"add_{art}"),
          InlineKeyboardButton("➖ Убавить", callback_data=f"remove_{art}")],
@@ -316,7 +317,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(user_id):
         await update.message.reply_text("⛔ Доступ к боту запрещён.")
         return
-
     is_admin = user_id in ADMIN_IDS
     welcome_text = (
         "👋 Добро пожаловать в бот складского учёта!\n\n"
@@ -328,50 +328,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, reply_markup=get_main_reply_keyboard(is_admin))
 
 async def show_reserves(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает текущие резервы."""
+    user_id = update.effective_user.id
     if not reserves:
-        await update.message.reply_text("📭 Нет активных резервов.", reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+        await update.message.reply_text("📭 Нет активных резервов.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
     else:
         lines = []
         for art, res_list in reserves.items():
+            discount_info = "🏷️ скидка" if inventory.get(art, [None, None, None, False])[3] else ""
             for r in res_list:
                 price_str = r.get('price', 'не указана')
-                lines.append(f"• {r['client']} — {art} — {r['qty']} ед. — цена: {price_str}")
-        await update.message.reply_text("📋 Текущие резервы:\n" + "\n".join(lines), reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+                discount_part = f" {discount_info}" if discount_info else ""
+                lines.append(f"• {r['client']} — {art} — {r['qty']} ед. — цена: {price_str}{discount_part}")
+        await update.message.reply_text("📋 Текущие резервы:\n" + "\n".join(lines), reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
 
 async def show_last_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает последние изменения."""
+    user_id = update.effective_user.id
     clean_old_logs()
     lines = get_last_changes(40)
     if not lines:
-        await update.message.reply_text("Нет записей об изменениях за последние 7 дней.", reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+        await update.message.reply_text("Нет записей об изменениях за последние 7 дней.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
     else:
-        await update.message.reply_text("📋 Последние 40 изменений (за 7 дней):\n" + "".join(lines), reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
+        await update.message.reply_text("📋 Последние 40 изменений (за 7 дней):\n" + "".join(lines), reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
 
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает диалог добавления."""
     await update.message.reply_text("➕ Введите артикул для добавления:", reply_markup=get_back_keyboard())
     context.user_data['awaiting'] = 'add_art'
 
 async def start_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает диалог убавления."""
     await update.message.reply_text("➖ Введите артикул для убавления:", reply_markup=get_back_keyboard())
     context.user_data['awaiting'] = 'remove_art'
 
 async def start_reserve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает диалог резервирования."""
     await update.message.reply_text("🕒 Введите артикул для резервирования:", reply_markup=get_back_keyboard())
     context.user_data['awaiting'] = 'reserve_art'
     context.user_data['reserve_items'] = []
     context.user_data['reserve_client'] = None
 
 async def start_unreserve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает диалог снятия резерва."""
     clients = get_all_clients()
     if not clients:
         await update.message.reply_text("❌ Нет активных резервов.", reply_markup=get_main_reply_keyboard(update.effective_user.id in ADMIN_IDS))
         return
-    # Для выбора клиента используем inline-кнопки (более удобно, чем reply)
     keyboard = []
     for idx, client in enumerate(clients):
         keyboard.append([InlineKeyboardButton(client, callback_data=f"unreserve_client_{idx}")])
@@ -391,25 +388,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     is_admin = user_id in ADMIN_IDS
 
-    # Возврат в главное меню
     if data == "back_to_main":
         context.user_data.clear()
-        await query.message.reply_text(
-            "👋 Выберите действие:",
-            reply_markup=get_main_reply_keyboard(is_admin)
-        )
+        await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
         return
 
-    # Другое количество (при резервировании)
     if data == "reserve_retry_qty":
         await query.message.delete()
         return
 
-    # Добавление позиции в резерв
     if data == "reserve_add_another":
         await query.edit_message_text("🕒 Введите следующий артикул для резервирования:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_art'
         return
+
     if data == "reserve_finish":
         items = context.user_data.get('reserve_items', [])
         client = context.user_data.get('reserve_client')
@@ -424,7 +416,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reserves[art].append({"client": client, "qty": qty, "price": price})
                 log_reserve_event(user_id, "зарезервировано", art, client, qty, price)
             save_reserves(reserves)
-            lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
+            lines = []
+            for art, qty, price in items:
+                discount_info = "🏷️ скидка" if inventory.get(art, [None, None, None, False])[3] else ""
+                lines.append(f"• {art} — {qty} ед. по цене {price} {discount_info}")
             await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines))
             await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
             context.user_data.pop('awaiting', None)
@@ -432,7 +427,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('reserve_client', None)
         return
 
-    # Выбор клиента для снятия резерва
     if data.startswith("unreserve_client_"):
         idx = int(data.split('_')[-1])
         clients = context.user_data.get('unreserve_clients', [])
@@ -455,7 +449,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['unreserve_step'] = 'select_article'
         return
 
-    # Назад к выбору клиента
     if data == "unreserve_back_to_clients":
         clients = context.user_data.get('unreserve_clients', [])
         keyboard = []
@@ -466,7 +459,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['unreserve_step'] = 'select_client'
         return
 
-    # Выбор конкретного артикула для снятия
     if data.startswith("unreserve_art_"):
         idx = int(data.split('_')[-1])
         articles = context.user_data.get('unreserve_articles', [])
@@ -489,7 +481,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting'] = 'unreserve_input_qty'
         return
 
-    # Выбор всех артикулов клиента
     if data == "unreserve_all":
         client = context.user_data.get('unreserve_client')
         if not client:
@@ -502,7 +493,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('unreserve_step', None)
         return
 
-    # Кнопки с предопределённым артикулом (из админских действий)
     if data.startswith("add_"):
         art = data[4:]
         await query.edit_message_text(f"➕ Введите количество для добавления к {art}:", reply_markup=get_back_keyboard())
@@ -520,7 +510,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("unreserve_"):
         art = data[10:]
-        # Старая логика – можно оставить для совместимости
         await query.edit_message_text(f"❌ Введите клиента для снятия резерва с {art} (или клиент, количество):", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"unreserve_data_{art}"
         return
@@ -537,7 +526,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Обработка нажатий на reply-кнопки (они приходят как текст)
     if text == "📋 Резервы":
         await show_reserves(update, context)
         return
@@ -545,13 +533,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_last_changes(update, context)
         return
     if text == "🔙 Назад":
-        # Возврат в главное меню
         is_admin = user_id in ADMIN_IDS
         await update.message.reply_text("👋 Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
         context.user_data.clear()
         return
 
-    # Админские действия
     if user_id in ADMIN_IDS:
         if text == "➕ Добавить":
             await start_add(update, context)
@@ -566,14 +552,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_unreserve(update, context)
             return
 
-    # Если есть ожидание ввода от диалога
     awaiting = context.user_data.get('awaiting')
     if awaiting:
-        # Перенаправляем в старый обработчик диалогов (с незначительными изменениями)
         await handle_dialog_input(update, context, text, awaiting)
         return
 
-    # Поиск по каталогу
     arts = find_catalog_arts(text)
     if not arts:
         await update.message.reply_text(f"❌ Артикул '{text}' не найден в каталоге.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
@@ -584,7 +567,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         art = sorted_arts[0]
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
-            # Отправляем результат с inline-кнопками для действий
             await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
@@ -639,16 +621,17 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
-        dop, qty, price = inventory[art]
+        dop, qty, price, discount = inventory[art]
         qty += delta
-        inventory[art] = [dop, qty, price]
+        inventory[art] = [dop, qty, price, discount]
         save_inventory()
         log_change(user_id, "добавлено", art, delta, qty)
         art_reserves = reserves.get(art, [])
         total_reserved = sum(r['qty'] for r in art_reserves)
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
-        reply = f"✅ Добавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
+        discount_info = "🏷️ Есть скидка" if discount else ""
+        reply = f"✅ Добавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n{discount_info}\n👤 Изменение внёс: {actor_name}"
         await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
@@ -690,24 +673,25 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
-        dop, qty, price = inventory[art]
+        dop, qty, price, discount = inventory[art]
         if qty - delta < 0:
             await update.message.reply_text(f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.", reply_markup=get_back_keyboard())
             return
         qty -= delta
-        inventory[art] = [dop, qty, price]
+        inventory[art] = [dop, qty, price, discount]
         save_inventory()
         log_change(user_id, "убавлено", art, delta, qty)
         art_reserves = reserves.get(art, [])
         total_reserved = sum(r['qty'] for r in art_reserves)
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
-        reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
+        discount_info = "🏷️ Есть скидка" if discount else ""
+        reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n{discount_info}\n👤 Изменение внёс: {actor_name}"
         await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
-    # ---------- Резервирование (многошаговое) ----------
+    # ---------- Резервирование ----------
     if awaiting == 'reserve_art':
         norm_art = normalize_art(text)
         if norm_art in stock_norm_to_art:
@@ -744,7 +728,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
-        dop, current_qty, price = inventory[art]
+        dop, current_qty, price, discount = inventory[art]
         total_reserved = sum(r['qty'] for r in reserves.get(art, []))
         available = current_qty - total_reserved
         if qty > available:
@@ -760,10 +744,8 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         context.user_data['reserve_current_qty'] = qty
         current_price = inventory[art][2]
-        if current_price and current_price != "0":
-            price_info = f"Текущая цена в базе: {current_price}\n"
-        else:
-            price_info = ""
+        discount_info = "🏷️ **Есть скидка!**" if discount else ""
+        price_info = f"Текущая цена в базе: {current_price}\n{discount_info}\n" if discount_info else f"Текущая цена в базе: {current_price}\n"
         await update.message.reply_text(f"{price_info}🕒 Введите цену за единицу для {art}:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_price'
         return
@@ -804,7 +786,10 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             reserves[art].append({"client": client, "qty": qty, "price": price})
             log_reserve_event(user_id, "зарезервировано", art, client, qty, price)
         save_reserves(reserves)
-        lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
+        lines = []
+        for art, qty, price in items:
+            discount_info = "🏷️ скидка" if inventory.get(art, [None, None, None, False])[3] else ""
+            lines.append(f"• {art} — {qty} ед. по цене {price} {discount_info}")
         await update.message.reply_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines))
         await update.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
@@ -845,7 +830,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('unreserve_max_qty', None)
         return
 
-    # Обработка старых команд (unreserve_data_art) для обратной совместимости
+    # ---------- Старые команды (unreserve_data_art) ----------
     if awaiting.startswith('unreserve_data_'):
         art = awaiting[14:]
         parts = [p.strip() for p in text.split(',')]
@@ -890,16 +875,17 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 await update.message.reply_text("❌ Не удалось снять резерв.", reply_markup=get_back_keyboard())
                 return
-        dop, current_qty, price = inventory[art]
+        dop, current_qty, price, discount = inventory[art]
         total_reserved = sum(r['qty'] for r in reserves.get(art, []))
         available = current_qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
-        reply = f"{action_msg}\n📦 Теперь по артикулу {art}: всего {current_qty}, доступно {available}, зарезервировано {total_reserved}\n👤 Действие выполнил: {actor_name}"
+        discount_info = "🏷️ Есть скидка" if discount else ""
+        reply = f"{action_msg}\n📦 Теперь по артикулу {art}: всего {current_qty}, доступно {available}, зарезервировано {total_reserved}, цена: {price} {discount_info}\n👤 Действие выполнил: {actor_name}"
         await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
 
-    # Кнопки с предопределённым артикулом (add_qty_art, remove_qty_art, reserve_qty_art)
+    # ---------- Кнопки с предопределённым артикулом ----------
     if awaiting.startswith('add_qty_'):
         art = awaiting[8:]
         try:
@@ -913,16 +899,17 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         if art not in inventory:
             await update.message.reply_text(f"❌ Артикул '{art}' не найден на складе.", reply_markup=get_back_keyboard())
             return
-        dop, qty, price = inventory[art]
+        dop, qty, price, discount = inventory[art]
         qty += delta
-        inventory[art] = [dop, qty, price]
+        inventory[art] = [dop, qty, price, discount]
         save_inventory()
         log_change(user_id, "добавлено", art, delta, qty)
         art_reserves = reserves.get(art, [])
         total_reserved = sum(r['qty'] for r in art_reserves)
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
-        reply = f"✅ Добавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
+        discount_info = "🏷️ Есть скидка" if discount else ""
+        reply = f"✅ Добавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n{discount_info}\n👤 Изменение внёс: {actor_name}"
         await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
@@ -940,19 +927,20 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         if art not in inventory:
             await update.message.reply_text(f"❌ Артикул '{art}' не найден на складе.", reply_markup=get_back_keyboard())
             return
-        dop, qty, price = inventory[art]
+        dop, qty, price, discount = inventory[art]
         if qty - delta < 0:
             await update.message.reply_text(f"❌ Недостаточно запаса: текущее количество {qty}, невозможно убавить {delta}.", reply_markup=get_back_keyboard())
             return
         qty -= delta
-        inventory[art] = [dop, qty, price]
+        inventory[art] = [dop, qty, price, discount]
         save_inventory()
         log_change(user_id, "убавлено", art, delta, qty)
         art_reserves = reserves.get(art, [])
         total_reserved = sum(r['qty'] for r in art_reserves)
         available = qty - total_reserved
         actor_name = USER_NAMES.get(user_id, f"пользователь {user_id}")
-        reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n👤 Изменение внёс: {actor_name}"
+        discount_info = "🏷️ Есть скидка" if discount else ""
+        reply = f"✅ Убавлено {delta} ед. для артикула {art}.\n📦 Теперь количество: {qty} (доступно: {available}, зарезервировано: {total_reserved})\n💰 Цена за единицу: {price}\n{discount_info}\n👤 Изменение внёс: {actor_name}"
         await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(True))
         context.user_data.pop('awaiting', None)
         return
@@ -970,7 +958,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         if art not in inventory:
             await update.message.reply_text(f"❌ Артикул '{art}' не найден на складе.", reply_markup=get_back_keyboard())
             return
-        dop, current_qty, price = inventory[art]
+        dop, current_qty, price, discount = inventory[art]
         total_reserved = sum(r['qty'] for r in reserves.get(art, []))
         available = current_qty - total_reserved
         if qty > available:
@@ -979,10 +967,8 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data['reserve_current_art'] = art
         context.user_data['reserve_current_qty'] = qty
         current_price = inventory[art][2]
-        if current_price and current_price != "0":
-            price_info = f"Текущая цена в базе: {current_price}\n"
-        else:
-            price_info = ""
+        discount_info = "🏷️ **Есть скидка!**" if discount else ""
+        price_info = f"Текущая цена в базе: {current_price}\n{discount_info}\n" if discount_info else f"Текущая цена в базе: {current_price}\n"
         await update.message.reply_text(f"{price_info}🕒 Введите цену за единицу для {art}:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_price'
         return
@@ -990,7 +976,6 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("Неизвестная команда.", reply_markup=get_main_reply_keyboard(user_id in ADMIN_IDS))
 
 async def post_init(application: Application) -> None:
-    """Устанавливает кнопку меню с командами при запуске бота."""
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 def main():
