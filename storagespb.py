@@ -62,7 +62,7 @@ def normalize_art(s):
     return s
 
 # ---------- Загрузка складских данных ----------
-inventory = {}               # art -> [dop, qty, price, discount_flag]  discount_flag = True если скидка есть
+inventory = {}               # art -> [dop, qty, price, discount]
 stock_norm_to_art = {}
 
 try:
@@ -77,11 +77,9 @@ try:
                 except ValueError:
                     qty = 0
                 price = clean_text(row[3])
-                discount = True  # по умолчанию считаем, что скидка есть
-                if len(row) >= 5:
-                    discount_val = clean_text(row[4])
-                    if discount_val == "1":
-                        discount = False  # если стоит "1", то скидки нет
+                discount = True  # по умолчанию скидка есть
+                if len(row) >= 5 and clean_text(row[4]) == "1":
+                    discount = False  # если стоит 1 — скидки нет
                 if art:
                     inventory[art] = [dop, qty, price, discount]
                     stock_norm_to_art[normalize_art(art)] = art
@@ -137,7 +135,7 @@ def save_inventory():
     with open(DATA_FILE, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
         for art, (dop, qty, price, discount) in inventory.items():
-            discount_str = "1" if not discount else ""   # если скидки нет, пишем "1", иначе пусто
+            discount_str = "1" if not discount else ""  # если скидки нет, пишем 1
             writer.writerow([art, dop, qty, price, discount_str])
 
 # ---------- Логирование изменений ----------
@@ -571,7 +569,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         art = sorted_arts[0]
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
+            # Отправляем результат с inline-кнопками, затем восстанавливаем основную клавиатуру
             await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
+            await update.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(True))
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
