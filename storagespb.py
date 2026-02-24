@@ -62,7 +62,7 @@ def normalize_art(s):
     return s
 
 # ---------- Загрузка складских данных ----------
-inventory = {}               # art -> [dop, qty, price, discount_flag]
+inventory = {}               # art -> [dop, qty, price, discount_flag]  discount_flag = True если скидка есть
 stock_norm_to_art = {}
 
 try:
@@ -77,9 +77,11 @@ try:
                 except ValueError:
                     qty = 0
                 price = clean_text(row[3])
-                discount = False
-                if len(row) >= 5 and clean_text(row[4]) == "1":
-                    discount = True
+                discount = True  # по умолчанию считаем, что скидка есть
+                if len(row) >= 5:
+                    discount_val = clean_text(row[4])
+                    if discount_val == "1":
+                        discount = False  # если стоит "1", то скидки нет
                 if art:
                     inventory[art] = [dop, qty, price, discount]
                     stock_norm_to_art[normalize_art(art)] = art
@@ -135,7 +137,7 @@ def save_inventory():
     with open(DATA_FILE, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
         for art, (dop, qty, price, discount) in inventory.items():
-            discount_str = "1" if discount else ""
+            discount_str = "1" if not discount else ""   # если скидки нет, пишем "1", иначе пусто
             writer.writerow([art, dop, qty, price, discount_str])
 
 # ---------- Логирование изменений ----------
@@ -334,7 +336,8 @@ async def show_reserves(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         lines = []
         for art, res_list in reserves.items():
-            discount_info = "🏷️ скидка" if inventory.get(art, [None, None, None, False])[3] else ""
+            discount = inventory.get(art, [None, None, None, False])[3]
+            discount_info = "🏷️ скидка" if discount else ""
             for r in res_list:
                 price_str = r.get('price', 'не указана')
                 discount_part = f" {discount_info}" if discount_info else ""
@@ -418,7 +421,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_reserves(reserves)
             lines = []
             for art, qty, price in items:
-                discount_info = "🏷️ скидка" if inventory.get(art, [None, None, None, False])[3] else ""
+                discount = inventory.get(art, [None, None, None, False])[3]
+                discount_info = "🏷️ скидка" if discount else ""
                 lines.append(f"• {art} — {qty} ед. по цене {price} {discount_info}")
             await query.edit_message_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines))
             await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
@@ -788,7 +792,8 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         save_reserves(reserves)
         lines = []
         for art, qty, price in items:
-            discount_info = "🏷️ скидка" if inventory.get(art, [None, None, None, False])[3] else ""
+            discount = inventory.get(art, [None, None, None, False])[3]
+            discount_info = "🏷️ скидка" if discount else ""
             lines.append(f"• {art} — {qty} ед. по цене {price} {discount_info}")
         await update.message.reply_text(f"✅ Резервы созданы для клиента '{client}':\n" + "\n".join(lines))
         await update.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(True))
