@@ -827,17 +827,23 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # ---------- Добавление ----------
+        # ---------- Добавление ----------
     if awaiting == 'add_art':
         norm_art = normalize_art(text)
+        # Сначала ищем точное совпадение в inventory
         if norm_art in stock_norm_to_art:
             art = stock_norm_to_art[norm_art]
         else:
+            # Ищем кандидатов (если есть похожие по нормализованному)
             candidates = [a for a in inventory if normalize_art(a) == norm_art]
             if not candidates:
-                await update.message.reply_text(f"❌ Артикул '{text}' не найден на складе.", reply_markup=get_back_keyboard())
-                context.user_data.pop('awaiting', None)
-                return
-            if len(candidates) == 1:
+                # Артикул не найден – создаём новый
+                art = clean_text(text)  # используем оригинальный ввод как артикул
+                # Добавляем в inventory с начальными значениями
+                inventory[art] = ["", 0, "0", True]  # dop пустой, qty=0, price="0", discount=True
+                stock_norm_to_art[norm_art] = art
+                await update.message.reply_text(f"➕ Артикул {art} не найден на складе, создана новая запись с количеством 0 и ценой 0.", reply_markup=get_back_keyboard())
+            elif len(candidates) == 1:
                 art = candidates[0]
             else:
                 lines = [format_art_info(a) for a in candidates]
@@ -1399,3 +1405,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
