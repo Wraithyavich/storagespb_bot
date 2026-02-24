@@ -4,9 +4,8 @@ import re
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram import MenuButtonCommands
 
 # ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
@@ -295,6 +294,8 @@ def get_main_keyboard(is_admin):
                          InlineKeyboardButton("➖ Убавить", callback_data="remove")])
         keyboard.append([InlineKeyboardButton("🕒 Отложить", callback_data="reserve"),
                          InlineKeyboardButton("❌ Снять резерв", callback_data="unreserve")])
+    # Кнопка "Начать заново" для всех пользователей
+    keyboard.append([InlineKeyboardButton("🔄 Начать заново", callback_data="restart")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_back_keyboard():
@@ -343,6 +344,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back_to_main":
         context.user_data.clear()
         await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
+        return
+
+    # Кнопка "Начать заново"
+    if data == "restart":
+        context.user_data.clear()
+        await query.edit_message_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
         return
 
     # Другое количество (при резервировании)
@@ -959,16 +966,13 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await update.message.reply_text("Неизвестная команда.", reply_markup=get_back_keyboard())
 
+async def post_init(application: Application) -> None:
+    """Устанавливает кнопку меню с командами при запуске бота."""
+    await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
 def main():
     clean_old_logs()
-    app = Application.builder().token(API_TOKEN).build()
-    # Добавляем кнопку меню
-    async def set_menu_button():
-        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-    
-    # Запускаем установку кнопки при старте
-    import asyncio
-    asyncio.create_task(set_menu_button())
+    app = Application.builder().token(API_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -980,4 +984,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
