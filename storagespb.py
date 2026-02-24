@@ -330,6 +330,7 @@ def get_main_reply_keyboard(is_admin):
         buttons.append([KeyboardButton("➕ Добавить"), KeyboardButton("➖ Убавить")])
         buttons.append([KeyboardButton("🕒 Отложить"), KeyboardButton("❌ Снять резерв")])
         buttons.append([KeyboardButton("📤 Отгрузка"), KeyboardButton("📥 Прибытие")])
+        buttons.append([KeyboardButton("📦 Провести отгрузки"), KeyboardButton("📦 Провести прибытия")])
         buttons.append([KeyboardButton("📊 Составить отчёт")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -346,6 +347,77 @@ def get_admin_actions_keyboard(art):
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+# ---------- Функции проведения операций ----------
+async def process_shipments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    global shipments
+    updated_count = 0
+    for art, sh_list in list(shipments.items()):
+        new_list = []
+        for sh in sh_list:
+            if not sh.get('processed', False):
+                # Проверяем наличие на складе
+                if art in inventory:
+                    dop, qty, price, discount = inventory[art]
+                    if sh['qty'] > qty:
+                        await update.message.reply_text(
+                            f"❌ Недостаточно товара {art} для отгрузки {sh['client']} {sh['qty']} ед. (в наличии {qty})",
+                            reply_markup=get_main_reply_keyboard(True)
+                        )
+                        # Не проводим, оставляем как есть
+                        new_list.append(sh)
+                        continue
+                    else:
+                        qty -= sh['qty']
+                        inventory[art] = [dop, qty, price, discount]
+                        save_inventory()
+                        sh['processed'] = True
+                        updated_count += 1
+                        new_list.append(sh)
+                        log_change(user_id, f"отгружено (клиент {sh['client']})", art, sh['qty'], qty)
+                else:
+                    # Артикул отсутствует на складе – просто помечаем как проведённый? Лучше не проводить.
+                    await update.message.reply_text(f"❌ Артикул {art} не найден на складе, отгрузка не проведена")
+                    new_list.append(sh)
+            else:
+                new_list.append(sh)
+        if new_list:
+            shipments[art] = new_list
+        else:
+            del shipments[art]
+    save_shipments(shipments)
+    await update.message.reply_text(f"✅ Проведено отгрузок: {updated_count}", reply_markup=get_main_reply_keyboard(True))
+
+async def process_receipts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    global receipts
+    updated_count = 0
+    for art, rc_list in list(receipts.items()):
+        new_list = []
+        for rc in rc_list:
+            if not rc.get('processed', False):
+                if art in inventory:
+                    dop, qty, price, discount = inventory[art]
+                    qty += rc['qty']
+                    inventory[art] = [dop, qty, price, discount]
+                    save_inventory()
+                    rc['processed'] = True
+                    updated_count += 1
+                    new_list.append(rc)
+                    log_change(user_id, f"прибыло (поставщик {rc['supplier']})", art, rc['qty'], qty)
+                else:
+                    # Если артикула нет на складе – создаём? По заданию просто пропускаем.
+                    await update.message.reply_text(f"❌ Артикул {art} не найден на складе, прибытие не проведено")
+                    new_list.append(rc)
+            else:
+                new_list.append(rc)
+        if new_list:
+            receipts[art] = new_list
+        else:
+            del receipts[art]
+    save_receipts(receipts)
+    await update.message.reply_text(f"✅ Проведено прибытий: {updated_count}", reply_markup=get_main_reply_keyboard(True))
 
 # ---------- Обработчики ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -436,7 +508,8 @@ async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if shipments:
         for art, sh_list in shipments.items():
             for sh in sh_list:
-                lines.append(f"  • {art} — {sh['client']} — {sh['qty']} ед. — цена: {sh['price']} — {sh['date']}")
+                processed_mark = " (проведено)" if sh.get('processed', False) else ""
+                lines.append(f"  • {art} — {sh['client']} — {sh['qty']} ед. — цена: {sh['price']} — {sh['date']}{processed_mark}")
     else:
         lines.append("  Нет отгрузок")
     lines.append("")
@@ -446,7 +519,8 @@ async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if receipts:
         for art, rc_list in receipts.items():
             for rc in rc_list:
-                lines.append(f"  • {art} — {rc['supplier']} — {rc['qty']} ед. — {rc['date']}")
+                processed_mark = " (проведено)" if rc.get('processed', False) else ""
+                lines.append(f"  • {art} — {rc['supplier']} — {rc['qty']} ед. — {rc['date']}{processed_mark}")
     else:
         lines.append("  Нет прибытий")
     lines.append("")
@@ -530,7 +604,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for art, qty, price in items:
                 if art not in shipments:
                     shipments[art] = []
-                shipments[art].append({"client": client, "qty": qty, "price": price, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                shipments[art].append({"client": client, "qty": qty, "price": price, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "processed": False})
             save_shipments(shipments)
             lines = [f"• {art} — {qty} ед. по цене {price} для {client}" for art, qty, price in items]
             await query.edit_message_text(f"✅ Отгрузки зафиксированы для клиента '{client}':\n" + "\n".join(lines))
@@ -556,7 +630,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for art, qty in items:
                 if art not in receipts:
                     receipts[art] = []
-                receipts[art].append({"supplier": supplier, "qty": qty, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                receipts[art].append({"supplier": supplier, "qty": qty, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "processed": False})
             save_receipts(receipts)
             lines = [f"• {art} — {qty} ед. от {supplier}" for art, qty in items]
             await query.edit_message_text(f"✅ Прибытия зафиксированы от поставщика '{supplier}':\n" + "\n".join(lines))
@@ -701,6 +775,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if text == "📥 Прибытие":
             await start_receipt(update, context)
+            return
+        if text == "📦 Провести отгрузки":
+            await process_shipments(update, context)
+            return
+        if text == "📦 Провести прибытия":
+            await process_receipts(update, context)
             return
 
     awaiting = context.user_data.get('awaiting')
@@ -995,9 +1075,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=get_back_keyboard()
             )
             return
-        current_qty -= qty
-        inventory[art] = [dop, current_qty, price, discount]
-        save_inventory()
+        # Не изменяем склад сейчас, только фиксируем отгрузку
         context.user_data['shipment_current_qty'] = qty
         context.user_data['shipment_current_price'] = price
         await update.message.reply_text(f"📤 Введите цену за единицу для {art} (можно изменить):", reply_markup=get_back_keyboard())
@@ -1037,7 +1115,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         for art, qty, price in items:
             if art not in shipments:
                 shipments[art] = []
-            shipments[art].append({"client": client, "qty": qty, "price": price, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            shipments[art].append({"client": client, "qty": qty, "price": price, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "processed": False})
         save_shipments(shipments)
         lines = [f"• {art} — {qty} ед. по цене {price}" for art, qty, price in items]
         await update.message.reply_text(f"✅ Отгрузки зафиксированы для клиента '{client}':\n" + "\n".join(lines))
@@ -1084,10 +1162,8 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Ошибка: артикул не найден. Начните заново.", reply_markup=get_main_reply_keyboard(True))
             context.user_data.pop('awaiting', None)
             return
-        dop, current_qty, price, discount = inventory[art]
-        current_qty += qty
-        inventory[art] = [dop, current_qty, price, discount]
-        save_inventory()
+        # Не изменяем склад сейчас, только фиксируем прибытие
+        context.user_data['receipt_current_qty'] = qty
         items = context.user_data.get('receipt_items', [])
         items.append((art, qty))
         context.user_data['receipt_items'] = items
@@ -1109,7 +1185,7 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         for art, qty in items:
             if art not in receipts:
                 receipts[art] = []
-            receipts[art].append({"supplier": supplier, "qty": qty, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            receipts[art].append({"supplier": supplier, "qty": qty, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "processed": False})
         save_receipts(receipts)
         lines = [f"• {art} — {qty} ед." for art, qty in items]
         await update.message.reply_text(f"✅ Прибытия зафиксированы от поставщика '{supplier}':\n" + "\n".join(lines))
