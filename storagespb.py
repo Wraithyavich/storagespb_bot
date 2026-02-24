@@ -488,14 +488,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting'] = 'reserve_art'
         return
 
-    if data == "reserve_finish":
-        items = context.user_data.get('reserve_items', [])
-        client = context.user_data.get('reserve_client')
-        if not client:
-            await query.edit_message_text("🕒 Введите имя клиента для всех позиций:", reply_markup=get_back_keyboard())
-            context.user_data['awaiting'] = 'reserve_client'
-            return
-        else:
+if data == "reserve_finish":
+    items = context.user_data.get('reserve_items', [])
+    client = context.user_data.get('reserve_client')
+    if not client:
+        await query.message.reply_text("🕒 Введите имя клиента для всех позиций:", reply_markup=get_back_keyboard())   # изменено
+        context.user_data['awaiting'] = 'reserve_client'
+        return
+    else:
             for art, qty, price in items:
                 if art not in reserves:
                     reserves[art] = []
@@ -519,14 +519,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("📤 Введите следующий артикул для отгрузки:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'shipment_art'
         return
-    if data == "shipment_finish":
-        items = context.user_data.get('shipment_items', [])
-        client = context.user_data.get('shipment_client')
-        if not client:
-            await query.edit_message_text("📤 Введите имя клиента для всех позиций:", reply_markup=get_back_keyboard())
-            context.user_data['awaiting'] = 'shipment_client'
-            return
-        else:
+if data == "shipment_finish":
+    items = context.user_data.get('shipment_items', [])
+    client = context.user_data.get('shipment_client')
+    if not client:
+        await query.message.reply_text("📤 Введите имя клиента для всех позиций:", reply_markup=get_back_keyboard())   # изменено
+        context.user_data['awaiting'] = 'shipment_client'
+        return
+    else:
             for art, qty, price in items:
                 if art not in shipments:
                     shipments[art] = []
@@ -546,14 +546,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("📥 Введите следующий артикул для прибытия:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'receipt_art'
         return
-    if data == "receipt_finish":
-        items = context.user_data.get('receipt_items', [])
-        supplier = context.user_data.get('receipt_supplier')
-        if not supplier:
-            await query.edit_message_text("📥 Введите поставщика для всех позиций:", reply_markup=get_back_keyboard())
-            context.user_data['awaiting'] = 'receipt_supplier'
-            return
-        else:
+if data == "receipt_finish":
+    items = context.user_data.get('receipt_items', [])
+    supplier = context.user_data.get('receipt_supplier')
+    if not supplier:
+        await query.message.reply_text("📥 Введите поставщика для всех позиций:", reply_markup=get_back_keyboard())   # изменено
+        context.user_data['awaiting'] = 'receipt_supplier'
+        return
+    else:
             for art, qty in items:  # items теперь только (art, qty) без цены
                 if art not in receipts:
                     receipts[art] = []
@@ -1321,3 +1321,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
