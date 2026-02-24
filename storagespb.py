@@ -135,7 +135,7 @@ def save_inventory():
     with open(DATA_FILE, mode='w', encoding='utf-8-sig', newline='') as file:
         writer = csv.writer(file, delimiter=';')
         for art, (dop, qty, price, discount) in inventory.items():
-            discount_str = "1" if not discount else ""  # если скидки нет, пишем 1
+            discount_str = "1" if not discount else ""
             writer.writerow([art, dop, qty, price, discount_str])
 
 # ---------- Логирование изменений ----------
@@ -217,7 +217,7 @@ def format_catalog_art(art):
     unique_dop = sorted(set(dop_short))
     dop_str = ", ".join(unique_dop) if unique_dop else "нет"
     if art in inventory:
-        _, qty, price, discount = inventory[art]   # dop не используем
+        _, qty, price, discount = inventory[art]
         stock_info = f"📦 На складе: {qty} ед., цена: {price}"
         discount_info = "\n🏷️ **Есть скидка!**" if discount else ""
         return f"🔍 Артикул: {art}\n📎 Доп. артикулы: {dop_str}\n{stock_info}{discount_info}"
@@ -274,7 +274,6 @@ def remove_partial_reserve(client, art, qty_to_remove):
                 removed = True
             elif r['qty'] == qty_to_remove:
                 removed = True
-                # не добавляем обратно, т.е. удаляем
             else:
                 return False
         else:
@@ -399,7 +398,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "reserve_add_another":
-        await query.edit_message_text("🕒 Введите следующий артикул для резервирования:", reply_markup=get_back_keyboard())
+        # Отправляем новое сообщение с обычной клавиатурой
+        await query.message.reply_text("🕒 Введите следующий артикул для резервирования:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = 'reserve_art'
         return
 
@@ -477,7 +477,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(is_admin))
             context.user_data.pop('unreserve_step', None)
         else:
-            await query.edit_message_text(f"📦 У клиента {client} зарезервировано {qty} ед. артикула {art}.\nВведите количество для снятия (или 'все'):", reply_markup=get_back_keyboard())
+            # Отправляем новое сообщение с обычной клавиатурой
+            await query.message.reply_text(
+                f"📦 У клиента {client} зарезервировано {qty} ед. артикула {art}.\nВведите количество для снятия (или 'все'):",
+                reply_markup=get_back_keyboard()
+            )
             context.user_data['unreserve_art'] = art
             context.user_data['unreserve_max_qty'] = qty
             context.user_data['awaiting'] = 'unreserve_input_qty'
@@ -497,22 +501,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("add_"):
         art = data[4:]
-        await query.edit_message_text(f"➕ Введите количество для добавления к {art}:", reply_markup=get_back_keyboard())
+        await query.message.reply_text(f"➕ Введите количество для добавления к {art}:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"add_qty_{art}"
         return
     if data.startswith("remove_"):
         art = data[7:]
-        await query.edit_message_text(f"➖ Введите количество для убавления с {art}:", reply_markup=get_back_keyboard())
+        await query.message.reply_text(f"➖ Введите количество для убавления с {art}:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"remove_qty_{art}"
         return
     if data.startswith("reserve_"):
         art = data[8:]
-        await query.edit_message_text(f"🕒 Введите количество для резервирования {art}:", reply_markup=get_back_keyboard())
+        await query.message.reply_text(f"🕒 Введите количество для резервирования {art}:", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"reserve_qty_{art}"
         return
     if data.startswith("unreserve_"):
         art = data[10:]
-        await query.edit_message_text(f"❌ Введите клиента для снятия резерва с {art} (или клиент, количество):", reply_markup=get_back_keyboard())
+        await query.message.reply_text(f"❌ Введите клиента для снятия резерва с {art} (или клиент, количество):", reply_markup=get_back_keyboard())
         context.user_data['awaiting'] = f"unreserve_data_{art}"
         return
 
@@ -570,7 +574,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
             await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
-            # Не отправляем дополнительное сообщение "Выберите действие", клавиатура остаётся
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
