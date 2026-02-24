@@ -570,6 +570,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
             await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
+            # Не отправляем дополнительное сообщение "Выберите действие", клавиатура остаётся
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
