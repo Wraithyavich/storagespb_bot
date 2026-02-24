@@ -569,9 +569,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         art = sorted_arts[0]
         reply = format_catalog_art(art)
         if user_id in ADMIN_IDS:
-            # Отправляем результат с inline-кнопками, затем восстанавливаем основную клавиатуру
             await update.message.reply_text(reply, reply_markup=get_admin_actions_keyboard(art))
-            await update.message.reply_text("Выберите действие:", reply_markup=get_main_reply_keyboard(True))
         else:
             await update.message.reply_text(reply, reply_markup=get_main_reply_keyboard(False))
     else:
