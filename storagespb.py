@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram import MenuButtonCommands
 
 # ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
@@ -961,6 +962,13 @@ async def handle_dialog_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 def main():
     clean_old_logs()
     app = Application.builder().token(API_TOKEN).build()
+    # Добавляем кнопку меню
+    async def set_menu_button():
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    
+    # Запускаем установку кнопки при старте
+    import asyncio
+    asyncio.create_task(set_menu_button())
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -972,3 +980,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
