@@ -294,8 +294,7 @@ def get_main_keyboard(is_admin):
                          InlineKeyboardButton("➖ Убавить", callback_data="remove")])
         keyboard.append([InlineKeyboardButton("🕒 Отложить", callback_data="reserve"),
                          InlineKeyboardButton("❌ Снять резерв", callback_data="unreserve")])
-    # Кнопка "Начать заново" для всех пользователей
-    keyboard.append([InlineKeyboardButton("🔄 Начать заново", callback_data="restart")])
+
     return InlineKeyboardMarkup(keyboard)
 
 def get_back_keyboard():
@@ -346,11 +345,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
         return
 
-    # Кнопка "Начать заново"
-    if data == "restart":
-        context.user_data.clear()
-        await query.edit_message_text("👋 Выберите действие:", reply_markup=get_main_keyboard(is_admin))
-        return
+
 
     # Другое количество (при резервировании)
     if data == "reserve_retry_qty":
@@ -984,3 +979,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
