@@ -333,9 +333,6 @@ def get_art_price_text(stocks, margin):
     return price_text
 
 def format_stock_for_warehouse(warehouse, stock):
-    if not stock:
-        return f"{warehouse['name']}: нет"
-
     return f"{warehouse['name']}: {stock['qty']}"
 
 def get_art_stock_sort_key(art, margin=DEFAULT_MARGIN):
@@ -357,11 +354,16 @@ def format_art_with_stock(art, links=None, margin=DEFAULT_MARGIN, label=None):
     display_art = label or art
     if loaded_warehouses:
         stocks = get_art_stocks(art)
-        if any(stock for _, stock in stocks):
-            price_part = get_art_price_text(stocks, margin)
+        found_stocks = [
+            (warehouse, stock)
+            for warehouse, stock in stocks
+            if stock
+        ]
+        if found_stocks:
+            price_part = get_art_price_text(found_stocks, margin)
             qty_part = "; ".join(
                 format_stock_for_warehouse(warehouse, stock)
-                for warehouse, stock in stocks
+                for warehouse, stock in found_stocks
             )
             stock_part = f"{price_part} | {qty_part}" if price_part else qty_part
         else:
